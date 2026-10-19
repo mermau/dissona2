@@ -73,6 +73,14 @@ inline constexpr const char* retrigger = "retrigger";
 inline constexpr const char* vcaSwMode = "vca_sw_mode";
 inline constexpr const char* polySplit = "poly_split";
 inline constexpr const char* quality   = "quality";
+// aggiunte
+inline constexpr const char* extVol    = "ext_vol";
+inline constexpr const char* extOpen   = "ext_open";
+inline constexpr const char* priority  = "priority";
+inline constexpr const char* pedal     = "vcf_pedal";
+inline constexpr const char* pedalRange= "pedal_range";
+inline constexpr const char* tune      = "tune";
+inline constexpr const char* tolerances= "tolerances";
 }
 
 namespace ds
@@ -82,15 +90,31 @@ inline juce::AudioProcessorValueTreeState::ParameterLayout createLayout()
     using namespace juce;
     std::vector<std::unique_ptr<RangedAudioParameter>> p;
     const int v = 1;
-    auto knob = [&] (const char* id, const char* name, float def, float lo = 0.0f, float hi = 1.0f)
+    using Fmt = std::function<String (float)>;
+    auto knob = [&] (const char* id, const char* name, float def, float lo = 0.0f, float hi = 1.0f, Fmt fmt = {})
     {
         p.push_back (std::make_unique<AudioParameterFloat> (ParameterID { id, v }, String::fromUTF8 (name), NormalisableRange<float> (lo, hi, 0.0f), def,
-            AudioParameterFloatAttributes().withStringFromValueFunction ([lo] (float x, int)
+            AudioParameterFloatAttributes().withStringFromValueFunction ([lo, fmt] (float x, int)
             {
+                if (fmt) return fmt (x);
                 // scale del pannello: 0 … 10; manopole bipolari −5 … +5
                 return lo < 0.0f ? String (x * 5.0f, 1) : String (x * 10.0f, 1);
             })));
     };
+    // valori in unità reali, calcolati con le stesse formule del motore
+    auto logT = [] (float k) { k = jlimit (0.0f, 1.0f, k); return (std::pow (100.0f, k) - 1.0f) / 99.0f; };
+    auto secs = [] (double t) { return t < 1.0 ? String (roundToInt (t * 1000.0)) + " ms" : String (t, t < 10.0 ? 2 : 1) + " s"; };
+    const Fmt attack  = [=] (float x) { return secs (2.08 * (900.0 + 1.0e6 * logT (x)) * 4.7e-6); };
+    const Fmt decay   = [=] (float x) { return secs (4.6 * (900.0 + 1.0e6 * logT (x)) * 4.7e-6); };
+    const Fmt release = [=] (float x) { return secs (4.6 * (3100.0 + 1.0e6 * logT (x)) * 4.7e-6); };
+    const Fmt percent = [] (float x) { return String (roundToInt (x * 100.0f)) + " %"; };
+    const Fmt rate    = [] (float x) { return String (30.0 * 10.0 / (10.0 + 990.0 * (1.0 - (double) x)), 2) + " Hz"; };
+    const Fmt cutoff  = [] (float x) { const double hz = 16.0 * std::pow (2.0, 10.55 * std::pow ((double) jlimit (0.0f, 1.0f, x), 0.48));
+                                       return hz < 1000.0 ? String (roundToInt (hz)) + " Hz" : String (hz / 1000.0, 2) + " kHz"; };
+    const Fmt delay   = [=] (float x) { return x <= 0.001f ? String ("0 ms") : secs (0.05 + 9.95 * logT (x)); };
+    auto semis = [] (float range) { return Fmt ([range] (float x) { const float st = x * range;
+                                    return (st >= 0 ? "+" : "") + String (st, 2) + " st"; }); };
+    const Fmt db = [] (float x) { return (x >= 0 ? "+" : "") + String (x * 15.0f, 1) + " dB"; };
     auto choice = [&] (const char* id, const char* name, StringArray items, int def)
     { p.push_back (std::make_unique<AudioParameterChoice> (ParameterID { id, v }, String::fromUTF8 (name), items, def)); };
     auto toggle = [&] (const char* id, const char* name, bool def)
@@ -110,37 +134,37 @@ inline juce::AudioProcessorValueTreeState::ParameterLayout createLayout()
     knob   (pid::mxPwAmt,  "LFO Mixer - Pulse width", 0.0f);
     choice (pid::mxPwSrc,  "LFO Mixer - Pulse width source", { "MAN.", "1", "2" }, 0);
 
-    knob   (pid::lfo1Rate,  "LFO 1 - Rate", 0.5f);
+    knob   (pid::lfo1Rate, "LFO 1 - Rate", 0.5f, 0.0f, 1.0f, rate);
     choice (pid::lfo1Wave,  "LFO 1 - Forma", { "Dente di sega inverso", "Triangolo", "Quadra", "Dente di sega" }, 1);
     toggle (pid::lfo1Delay, "LFO 1 - Delay IN", false);
-    knob   (pid::lfo2Rate,  "LFO 2 - Rate", 0.5f);
+    knob   (pid::lfo2Rate, "LFO 2 - Rate", 0.5f, 0.0f, 1.0f, rate);
     choice (pid::lfo2Wave,  "LFO 2 - Forma", { "S&H (random)", "Triangolo", "Quadra", "Staircase" }, 1);
     toggle (pid::lfo2Delay, "LFO 2 - Delay IN", false);
-    knob   (pid::lfoDelay,  "LFO's Delay", 0.3f);
+    knob   (pid::lfoDelay, "LFO's Delay", 0.3f, 0.0f, 1.0f, delay);
 
     knob   (pid::o1Vol,   "OSC 1 - Volume", 0.7f);
-    knob   (pid::o1Pitch, "OSC 1 - Pitch", 0.0f, -1.0f, 1.0f);
+    knob   (pid::o1Pitch, "OSC 1 - Pitch", 0.0f, -1.0f, 1.0f, semis (6.0f));
     choice (pid::o1Range, "OSC 1 - Ottava", foot, 2);
     choice (pid::o1Wave,  "OSC 1 - Forma", { "Dente di sega", "Triangolo", "Quadra", "Impulso" }, 0);
     knob   (pid::o2Vol,   "OSC 2 - Volume", 0.0f);
-    knob   (pid::o2Pitch, "OSC 2 - Pitch", 0.0f, -1.0f, 1.0f);
+    knob   (pid::o2Pitch, "OSC 2 - Pitch", 0.0f, -1.0f, 1.0f, semis (9.0f));
     choice (pid::o2Range, "OSC 2 - Ottava", foot, 2);
     choice (pid::o2Wave,  "OSC 2 - Forma", { "Dente di sega", "Triangolo", "Quadra" }, 1);
     toggle (pid::kbdCtrl, "Keyboard control IN", false);
 
     knob   (pid::vcfEnv, "VCF - ADSR range", 0.5f);
-    knob   (pid::vcfCut, "VCF - Cutoff", 0.55f);
+    knob   (pid::vcfCut, "VCF - Cutoff", 0.55f, 0.0f, 1.0f, cutoff);
     knob   (pid::vcfRes, "VCF - Resonance", 0.0f);
-    knob   (pid::vcfA,   "VCF - Attack", 0.0f);
-    knob   (pid::vcfD,   "VCF - Decay", 0.55f);
-    knob   (pid::vcfS,   "VCF - Sustain", 0.6f);
-    knob   (pid::vcfR,   "VCF - Release", 0.2f);
+    knob   (pid::vcfA, "VCF - Attack", 0.0f, 0.0f, 1.0f, attack);
+    knob   (pid::vcfD, "VCF - Decay", 0.55f, 0.0f, 1.0f, decay);
+    knob   (pid::vcfS, "VCF - Sustain", 0.6f, 0.0f, 1.0f, percent);
+    knob   (pid::vcfR, "VCF - Release", 0.2f, 0.0f, 1.0f, release);
 
     knob   (pid::vcaEnv, "VCA - ADSR range", 0.8f);
-    knob   (pid::vcaA,   "VCA - Attack", 0.0f);
-    knob   (pid::vcaD,   "VCA - Decay", 0.55f);
-    knob   (pid::vcaS,   "VCA - Sustain", 0.8f);
-    knob   (pid::vcaR,   "VCA - Release", 0.2f);
+    knob   (pid::vcaA, "VCA - Attack", 0.0f, 0.0f, 1.0f, attack);
+    knob   (pid::vcaD, "VCA - Decay", 0.55f, 0.0f, 1.0f, decay);
+    knob   (pid::vcaS, "VCA - Sustain", 0.8f, 0.0f, 1.0f, percent);
+    knob   (pid::vcaR, "VCA - Release", 0.2f, 0.0f, 1.0f, release);
     toggle (pid::vcaIn,  "ADSR to VCA IN", false);
 
     knob   (pid::noiseVol,  "Noise - Volume", 0.0f);
@@ -148,19 +172,19 @@ inline juce::AudioProcessorValueTreeState::ParameterLayout createLayout()
 
     knob   (pid::polyLfoAmt, "Poly - LFO amount", 0.0f);
     choice (pid::polyLfoSrc, "Poly - LFO", src, 0);
-    knob   (pid::polyHigh,   "Poly - High pass (acuti)", 0.0f, -1.0f, 1.0f);
-    knob   (pid::polyLow,    "Poly - Low pass (bassi)", 0.0f, -1.0f, 1.0f);
+    knob   (pid::polyHigh, "Poly - High pass (acuti)", 0.0f, -1.0f, 1.0f, db);
+    knob   (pid::polyLow, "Poly - Low pass (bassi)", 0.0f, -1.0f, 1.0f, db);
     knob   (pid::polyVol,    "Poly - Volume", 0.6f);
     toggle (pid::polyOn,     "Poly IN", false);
     choice (pid::polyOct,    "Poly - Octave", { "16'", "8'", "4'" }, 1);
-    knob   (pid::polyPitch,  "Poly - Pitch", 0.0f, -1.0f, 1.0f);
+    knob   (pid::polyPitch, "Poly - Pitch", 0.0f, -1.0f, 1.0f, semis (4.0f));
 
     toggle (pid::headMain,   "Head / Main (Head)", false);
     knob   (pid::volume,     "Volume", 0.7f);
     toggle (pid::glideOn,    "Glide IN", false);
     toggle (pid::glideLong,  "Glide - Speed range IN", false);
     knob   (pid::glideSpeed, "Glide - Speed", 0.5f);
-    knob   (pid::bend,       "Pitch bending", 0.0f, -1.0f, 1.0f);
+    knob   (pid::bend, "Pitch bending", 0.0f, -1.0f, 1.0f, semis (3.0f));
 
     p.push_back (std::make_unique<AudioParameterInt> (ParameterID { pid::bendRange, v }, "Pitch bend MIDI (semitoni)", 0, 12, 3));
     choice (pid::keyRange,  "Estensione tastiera", { "Completa (MIDI)", "44 tasti FA-DO (originale)" }, 0);
@@ -168,6 +192,16 @@ inline juce::AudioProcessorValueTreeState::ParameterLayout createLayout()
     choice (pid::vcaSwMode, "Deviatore VCF-VCA", { "Manuale Crumar", "Macchina Bassi" }, 0);
     toggle (pid::polySplit, "Uscita POLY separata", false);
     choice (pid::quality,   "Qualita", { "Normale (2x)", "Alta (4x)" }, 0);
+
+    knob   (pid::extVol,  "Ingresso esterno - Livello", 0.0f);
+    toggle (pid::extOpen, "Ingresso esterno - VCA aperto", false);
+    choice (pid::priority, "Priorita note MONO", { "Piu acuta", "Piu grave", "Ultima suonata" }, 0);
+    knob   (pid::pedal,   "Pedale del filtro", 0.0f);
+    choice (pid::pedalRange, "Pedale del filtro - Escursione", { "Spento", "2 ottave", "4 ottave", "6 ottave" }, 2);
+    p.push_back (std::make_unique<AudioParameterFloat> (ParameterID { pid::tune, v }, "Accordatura (La4)",
+        NormalisableRange<float> (430.0f, 450.0f, 0.0f), 440.0f,
+        AudioParameterFloatAttributes().withLabel ("Hz").withStringFromValueFunction ([] (float x, int) { return String (x, 1) + " Hz"; })));
+    toggle (pid::tolerances, "Tolleranze analogiche", true);
 
     return { p.begin(), p.end() };
 }

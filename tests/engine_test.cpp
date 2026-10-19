@@ -62,6 +62,7 @@ static EngineParams base()
     p.vcfCut = 1.0f; p.vcfEnv = 0.0f; p.vcfRes = 0.0f;
     p.vcaEnv = 1.0f; p.vcaA = 0.0f; p.vcaD = 0.0f; p.vcaS = 1.0f; p.vcaR = 0.0f;
     p.volume = 1.0f;
+    p.tolerances = false;
     return p;
 }
 
@@ -178,6 +179,90 @@ int main (int argc, char** argv)
             for (size_t i = 0; i < out.size(); ++i) out[i] = 0.5f * (all[2 * i] + all[2 * i + 1]);
             writeWav (dir + "/" + d.name + ".wav", out, 48000);
         }
+    }
+
+    std::printf ("8) priorità delle note MONO\n");
+    for (int pr = 0; pr < 3; ++pr)
+    {
+        Ds2Engine e; e.prepare (fs);
+        auto p = base(); p.o1Wave = 2; p.priority = pr; e.setParams (p);
+        e.noteOn (60); render (e, 2000); e.noteOn (72); render (e, 2000); e.noteOn (48);
+        auto y = render (e, (int) (0.6 * fs));
+        const double got = pitchOf (y, fs, (size_t) (0.2 * fs));
+        const int expect = pr == 0 ? 72 : pr == 1 ? 48 : 48;   // ultima suonata = 48
+        const double cents = 1200.0 * std::log2 (got / (440.0 * std::exp2 ((expect - 69) / 12.0)));
+        std::printf ("   priorità %d: suona %.1f Hz (%+.1f cent dalla nota %d)\n", pr, got, cents, expect);
+        CHECK (std::fabs (cents) < 5.0, "priorità %d", pr);
+    }
+    {   // ultima suonata: rilasciando l'ultima torna alla precedente ancora tenuta
+        Ds2Engine e; e.prepare (fs);
+        auto p = base(); p.o1Wave = 2; p.priority = 2; e.setParams (p);
+        e.noteOn (60); render (e, 2000); e.noteOn (55); render (e, 2000); e.noteOn (64); render (e, 2000); e.noteOff (64);
+        auto y = render (e, (int) (0.6 * fs));
+        const double got = pitchOf (y, fs, (size_t) (0.2 * fs));
+        CHECK (std::fabs (1200.0 * std::log2 (got / (440.0 * std::exp2 ((55 - 69) / 12.0)))) < 5.0, "ritorno alla nota precedente");
+    }
+
+    std::printf ("9) accordatura generale\n");
+    {
+        Ds2Engine e; e.prepare (fs);
+        auto p = base(); p.o1Wave = 2; p.tuneA4 = 432.0f; e.setParams (p);
+        e.noteOn (69);
+        auto y = render (e, (int) fs);
+        const double got = pitchOf (y, fs, (size_t) (0.2 * fs));
+        std::printf ("   La4 a 432 Hz: %.2f Hz\n", got);
+        CHECK (std::fabs (got - 432.0) < 1.0, "accordatura %.2f", got);
+    }
+
+    std::printf ("10) tolleranze analogiche\n");
+    {
+        double maxc = 0.0;
+        for (uint32_t seed = 1; seed < 40; ++seed)
+        {
+            Ds2Engine e; e.prepare (fs); e.setSeed (seed * 2654435761u);
+            auto p = base(); p.o1Wave = 2; p.tolerances = true; e.setParams (p);
+            e.noteOn (69);
+            auto y = render (e, (int) (0.6 * fs));
+            maxc = std::max (maxc, std::fabs (1200.0 * std::log2 (pitchOf (y, fs, (size_t) (0.2 * fs)) / 440.0)));
+        }
+        std::printf ("   scostamento massimo d'intonazione su 39 esemplari: %.1f cent\n", maxc);
+        CHECK (maxc < 4.0 && maxc > 0.2, "scostamento %.1f cent", maxc);
+    }
+
+    std::printf ("11) ingresso esterno\n");
+    {
+        for (int open = 0; open < 2; ++open)
+        {
+            Ds2Engine e; e.prepare (fs);
+            auto p = base(); p.o1Vol = 0.0f; p.extVol = 1.0f; p.extOpen = open == 1; p.vcfCut = 0.8f; e.setParams (p);
+            const int n = (int) (0.5 * fs);
+            std::vector<float> in ((size_t) n), y ((size_t) n), pp ((size_t) n);
+            for (int i = 0; i < n; ++i) in[(size_t) i] = 0.5f * std::sin (2.0 * kPi * 220.0 * i / fs);
+            e.process (y.data(), pp.data(), n, in.data());
+            const double r = rms (y, (size_t) (0.2 * fs));
+            std::printf ("   %s, nessun tasto: rms %.4f\n", open ? "VCA OPEN" : "VCA GATE", r);
+            CHECK (open ? r > 0.02 : r < 1.0e-4, "ingresso esterno %s", open ? "open" : "gate");
+        }
+    }
+
+    std::printf ("12) riposo\n");
+    {
+        Ds2Engine e; e.prepare (fs);
+        auto p = base(); e.setParams (p);
+        e.noteOn (60); render (e, (int) (0.2 * fs)); e.noteOff (60);
+        for (int b = 0; b < 200; ++b) render (e, 480);   // blocchi come in una DAW
+        CHECK (e.isSleeping(), "il motore non va a riposo dopo il rilascio");
+        e.noteOn (60);
+        auto y = render (e, (int) (0.2 * fs));
+        CHECK (rms (y, (size_t) (0.1 * fs)) > 0.05, "il motore non si risveglia");
+        std::printf ("   riposo dopo il rilascio e risveglio alla nota: %s\n", e.isSleeping() ? "NO" : "ok");
+        std::vector<float> a ((size_t) fs), b ((size_t) fs);
+        Ds2Engine idle; idle.prepare (fs); idle.setParams (p);
+        idle.process (a.data(), b.data(), 9600);
+        const auto t0 = std::chrono::steady_clock::now();
+        for (int r = 0; r < 100; ++r) idle.process (a.data(), b.data(), (int) fs);
+        const double sec = std::chrono::duration<double> (std::chrono::steady_clock::now() - t0).count();
+        std::printf ("   CPU a riposo: %.2f %% di un core\n", sec);
     }
 
     std::printf (failures ? "\n%d TEST FALLITI\n" : "\nTutti i test superati\n", failures);

@@ -19,6 +19,14 @@ public:
     virtual ~LearnHost() = default;
     virtual void showControlMenu (juce::Component& c, const juce::String& paramId) = 0;
     virtual bool isLearning (const juce::String& paramId) const = 0;
+    // fumetto con il valore del comando (passaggio del mouse, trascinamento, rotella)
+    virtual void showValue (juce::Component& c, const juce::String& paramId, bool show) = 0;
+};
+
+// Regolazione comune di manopole e cursori: trascinamento (fine con ⇧ o ⌘), rotella, doppio clic
+struct Drag
+{
+    static bool fine (const juce::ModifierKeys& m) { return m.isShiftDown() || m.isCommandDown(); }
 };
 
 //==============================================================================
@@ -31,6 +39,9 @@ public:
     void mouseDrag (const juce::MouseEvent& e) override;
     void mouseUp (const juce::MouseEvent& e) override;
     void mouseWheelMove (const juce::MouseEvent& e, const juce::MouseWheelDetails& w) override;
+    void mouseDoubleClick (const juce::MouseEvent& e) override;
+    void mouseEnter (const juce::MouseEvent&) override { host.showValue (*this, paramId, true); }
+    void mouseExit (const juce::MouseEvent&) override { if (! dragging) host.showValue (*this, paramId, false); }
     void paint (juce::Graphics&) override;
 
     LearnHost& host;
@@ -39,8 +50,11 @@ public:
     int positions;
     float startDeg = -135.0f, endDeg = 135.0f;
     float radius = 20.0f;
+    double defaultValue = 0.0;
+    bool showTicks = false;          // manopola senza scala serigrafata (EXT)
 private:
-    bool dragged = false;
+    bool dragged = false, dragging = false;
+    juce::Point<float> last;
 };
 
 //==============================================================================
@@ -63,10 +77,48 @@ class Fader : public juce::Slider
 public:
     Fader (LearnHost& h, juce::String id, bool horizontal);
     void mouseDown (const juce::MouseEvent& e) override;
+    void mouseDrag (const juce::MouseEvent& e) override;
+    void mouseUp (const juce::MouseEvent& e) override;
+    void mouseWheelMove (const juce::MouseEvent& e, const juce::MouseWheelDetails& w) override;
+    void mouseDoubleClick (const juce::MouseEvent& e) override;
+    void mouseEnter (const juce::MouseEvent&) override { host.showValue (*this, paramId, true); }
+    void mouseExit (const juce::MouseEvent&) override { if (! dragging) host.showValue (*this, paramId, false); }
     void paint (juce::Graphics&) override;
     LearnHost& host;
     juce::String paramId;
     bool horiz;
+    double defaultValue = 0.0;
+private:
+    bool dragging = false;
+    juce::Point<float> last;
+};
+
+//==============================================================================
+// Fumetto con nome e valore del comando
+class ValueBubble : public juce::Component
+{
+public:
+    void paint (juce::Graphics&) override;
+    juce::String title, value;
+};
+
+//==============================================================================
+// Barra dei preset: ◀ nome ▶, menu, A/B, salva
+class PresetBar : public juce::Component, public juce::SettableTooltipClient
+{
+public:
+    explicit PresetBar (DsProcessor& p) : proc (p) {}
+    void paint (juce::Graphics&) override;
+    void mouseDown (const juce::MouseEvent&) override;
+    void refresh();
+private:
+    void showMenu();
+    void save();
+    juce::Rectangle<float> prevR() const, nextR() const, nameR() const, abR() const, saveR() const;
+    DsProcessor& proc;
+    juce::String shownName;
+    bool shownMod = false, shownB = false;
+    std::unique_ptr<juce::FileChooser> chooser;
 };
 
 //==============================================================================
@@ -111,6 +163,7 @@ public:
 
     void showControlMenu (juce::Component&, const juce::String& paramId) override;
     bool isLearning (const juce::String& paramId) const override;
+    void showValue (juce::Component& c, const juce::String& paramId, bool show) override;
 
     enum class Scale { Ten, Bipolar5, Bipolar4, Db15, None };
     struct KnobSpec { const char* id; float x, y; Scale scale; const char* label; const char* tip; };
@@ -140,6 +193,11 @@ private:
     std::vector<FadSpec> fadSpecs;
     Keys keys;
     BendLever lever;
+    PresetBar presetBar;
+    ValueBubble bubble;
+    juce::Component* bubbleFor = nullptr;
+    juce::String bubbleParam;
+    void placeBubble();
     juce::Rectangle<float> logoArea;
     float led1 = 0.0f, led2 = 0.0f;
     juce::String learnId;

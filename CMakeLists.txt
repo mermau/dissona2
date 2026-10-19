@@ -40,7 +40,9 @@ juce_add_plugin(Dissona2
     COPY_PLUGIN_AFTER_BUILD FALSE
     VST3_CATEGORIES Instrument Synth
     AU_MAIN_TYPE kAudioUnitType_MusicDevice
-    ICON_BIG "${CMAKE_CURRENT_SOURCE_DIR}/resources/icon.png")
+    ICON_BIG "${CMAKE_CURRENT_SOURCE_DIR}/resources/icon.png"
+    MICROPHONE_PERMISSION_ENABLED TRUE
+    MICROPHONE_PERMISSION_TEXT "DISSONA 2 usa l'ingresso audio come sorgente esterna (EXT. INPUT) del filtro.")
 
 juce_add_binary_data(Dissona2_Data SOURCES
     resources/fonts/Michroma.ttf
@@ -79,6 +81,16 @@ if(DISSONA2_BUILD_TESTS)
     target_compile_definitions(gui_snapshot PRIVATE
         JucePlugin_Name="DISSONA 2"
         JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_MODAL_LOOPS_PERMITTED=1)
+    juce_add_console_app(render_presets PRODUCT_NAME "render_presets")
+    target_sources(render_presets PRIVATE tests/render_presets.cpp src/PluginProcessor.cpp src/PluginEditor.cpp)
+    target_include_directories(render_presets PRIVATE src)
+    target_compile_definitions(render_presets PRIVATE
+        JucePlugin_Name="DISSONA 2"
+        JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_MODAL_LOOPS_PERMITTED=1)
+    target_link_libraries(render_presets PRIVATE
+        Dissona2_Data juce::juce_audio_utils juce::juce_dsp
+        juce::juce_recommended_config_flags)
+
     target_link_libraries(gui_snapshot PRIVATE
         Dissona2_Data juce::juce_audio_utils juce::juce_dsp
         juce::juce_recommended_config_flags)

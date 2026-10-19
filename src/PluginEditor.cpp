@@ -164,33 +164,63 @@ void Knob::mouseDown (const MouseEvent& e)
 {
     if (e.mods.isPopupMenu()) { host.showControlMenu (*this, paramId); return; }
     dragged = false;
-    Slider::mouseDown (e);
+    if (isSelector) { Slider::mouseDown (e); return; }
+    // manopola: trascinamento gestito qui per avere la regolazione fine con ⇧ o ⌘
+    dragging = true;
+    last = e.position;
+    if (onDragStart) onDragStart();
+    host.showValue (*this, paramId, true);
 }
 void Knob::mouseDrag (const MouseEvent& e)
 {
+    if (e.mods.isPopupMenu()) return;
     if (e.getDistanceFromDragStart() > 3) dragged = true;
-    Slider::mouseDrag (e);
+    if (isSelector) { Slider::mouseDrag (e); return; }
+    const float delta = (last.y - e.position.y) + (e.position.x - last.x);
+    last = e.position;
+    const double sens = Drag::fine (e.mods) ? 2400.0 : 260.0;   // pixel per tutta la corsa
+    const double prop = jlimit (0.0, 1.0, valueToProportionOfLength (getValue()) + (double) delta / sens);
+    setValue (proportionOfLengthToValue (prop), sendNotificationSync);
 }
 void Knob::mouseUp (const MouseEvent& e)
 {
+    if (e.mods.isPopupMenu()) return;
+    if (! isSelector)
+    {
+        dragging = false;
+        if (onDragEnd) onDragEnd();
+        if (! isMouseOver()) host.showValue (*this, paramId, false);
+        return;
+    }
     Slider::mouseUp (e);
     // un clic senza trascinare fa avanzare il selettore di una posizione
-    if (isSelector && ! dragged && ! e.mods.isPopupMenu())
+    if (! dragged)
     {
         double v = getValue() + 1.0;
         if (v > getMaximum()) v = getMinimum();
         setValue (v, sendNotificationSync);
     }
 }
+void Knob::mouseDoubleClick (const MouseEvent& e)
+{
+    // doppio clic: valore predefinito (i selettori avanzano già con il clic singolo)
+    if (isSelector || e.mods.isPopupMenu()) return;
+    if (onDragStart) onDragStart();
+    setValue (defaultValue, sendNotificationSync);
+    if (onDragEnd) onDragEnd();
+}
 void Knob::mouseWheelMove (const MouseEvent& e, const MouseWheelDetails& w)
 {
+    const float d = (w.isReversed ? -1.0f : 1.0f) * (std::abs (w.deltaY) > std::abs (w.deltaX) ? w.deltaY : w.deltaX);
+    if (std::abs (d) < 1.0e-6f) return;
     if (isSelector)
     {
-        const double dir = (w.deltaY + w.deltaX) > 0 ? 1.0 : -1.0;
-        setValue (jlimit (getMinimum(), getMaximum(), getValue() + dir), sendNotificationSync);
+        setValue (jlimit (getMinimum(), getMaximum(), getValue() + (d > 0 ? 1.0 : -1.0)), sendNotificationSync);
         return;
     }
-    Slider::mouseWheelMove (e, w);
+    const double step = Drag::fine (e.mods) ? 0.03 : 0.25;
+    setValue (proportionOfLengthToValue (jlimit (0.0, 1.0, valueToProportionOfLength (getValue()) + (double) d * step)), sendNotificationSync);
+    host.showValue (*this, paramId, true);
 }
 
 void Knob::paint (Graphics& g)
@@ -200,6 +230,15 @@ void Knob::paint (Graphics& g)
     const float prop = (float) valueToProportionOfLength (getValue());
     const float deg = startDeg + prop * (endDeg - startDeg);
 
+    if (! isSelector && showTicks)
+    {
+        g.setColour (kPrint);
+        for (int i = 0; i <= 10; ++i)
+        {
+            const float ang = -135.0f + 27.0f * (float) i;
+            g.drawLine (Line<float> (polar (c, radius + 1.0f, ang), polar (c, radius + 3.5f, ang)), i % 5 == 0 ? 1.6f : 1.0f);
+        }
+    }
     if (! isSelector)
     {
         // manopola nera zigrinata con indice crema
@@ -324,7 +363,42 @@ Fader::Fader (LearnHost& h, String id, bool horizontal)
 void Fader::mouseDown (const MouseEvent& e)
 {
     if (e.mods.isPopupMenu()) { host.showControlMenu (*this, paramId); return; }
-    Slider::mouseDown (e);
+    dragging = true;
+    last = e.position;
+    if (onDragStart) onDragStart();
+    host.showValue (*this, paramId, true);
+}
+void Fader::mouseDrag (const MouseEvent& e)
+{
+    if (e.mods.isPopupMenu()) return;
+    const float delta = horiz ? e.position.x - last.x : last.y - e.position.y;
+    last = e.position;
+    const double travel = (double) (horiz ? getWidth() : getHeight()) - 14.0;
+    const double sens = Drag::fine (e.mods) ? travel * 8.0 : travel;   // normale: il cappuccio segue il mouse
+    const double prop = jlimit (0.0, 1.0, valueToProportionOfLength (getValue()) + (double) delta / sens);
+    setValue (proportionOfLengthToValue (prop), sendNotificationSync);
+}
+void Fader::mouseUp (const MouseEvent& e)
+{
+    if (e.mods.isPopupMenu()) return;
+    dragging = false;
+    if (onDragEnd) onDragEnd();
+    if (! isMouseOver()) host.showValue (*this, paramId, false);
+}
+void Fader::mouseDoubleClick (const MouseEvent& e)
+{
+    if (e.mods.isPopupMenu()) return;
+    if (onDragStart) onDragStart();
+    setValue (defaultValue, sendNotificationSync);
+    if (onDragEnd) onDragEnd();
+}
+void Fader::mouseWheelMove (const MouseEvent& e, const MouseWheelDetails& w)
+{
+    const float d = (w.isReversed ? -1.0f : 1.0f) * (std::abs (w.deltaY) > std::abs (w.deltaX) ? w.deltaY : w.deltaX);
+    if (std::abs (d) < 1.0e-6f) return;
+    const double step = Drag::fine (e.mods) ? 0.03 : 0.25;
+    setValue (proportionOfLengthToValue (jlimit (0.0, 1.0, valueToProportionOfLength (getValue()) + (double) d * step)), sendNotificationSync);
+    host.showValue (*this, paramId, true);
 }
 void Fader::paint (Graphics& g)
 {
@@ -400,6 +474,153 @@ void BendLever::paint (Graphics& g)
 }
 
 //==============================================================================
+void ValueBubble::paint (Graphics& g)
+{
+    auto b = getLocalBounds().toFloat().reduced (1.0f);
+    g.setColour (Colours::black.withAlpha (0.45f)); g.fillRoundedRectangle (b.translated (2, 3), 7.0f);
+    g.setColour (Colour (0xf2141310)); g.fillRoundedRectangle (b, 7.0f);
+    g.setColour (kLine); g.drawRoundedRectangle (b, 7.0f, 1.6f);
+    g.setColour (kPrint.withMultipliedBrightness (0.75f));
+    g.setFont (Fonts::get().label (10.5f));
+    g.drawText (title, b.removeFromTop (b.getHeight() * 0.45f).reduced (8.0f, 0.0f).translated (0, 3), Justification::centred, true);
+    g.setColour (kPrint);
+    g.setFont (Fonts::get().label (15.0f));
+    g.drawText (value, b.reduced (8.0f, 0.0f).translated (0, -2), Justification::centred, true);
+}
+
+//==============================================================================
+Rectangle<float> PresetBar::prevR() const { return { 0.0f, 6.0f, 40.0f, (float) getHeight() - 12.0f }; }
+Rectangle<float> PresetBar::nameR() const { return { 46.0f, 0.0f, 340.0f, (float) getHeight() }; }
+Rectangle<float> PresetBar::nextR() const { return { 392.0f, 6.0f, 40.0f, (float) getHeight() - 12.0f }; }
+Rectangle<float> PresetBar::abR()   const { return { 448.0f, 6.0f, 64.0f, (float) getHeight() - 12.0f }; }
+Rectangle<float> PresetBar::saveR() const { return { 520.0f, 6.0f, 80.0f, (float) getHeight() - 12.0f }; }
+
+void PresetBar::paint (Graphics& g)
+{
+    auto button = [&] (Rectangle<float> r, bool lit)
+    {
+        g.setColour (Colours::black.withAlpha (0.45f)); g.fillRoundedRectangle (r.translated (1.5f, 2.5f), 5.0f);
+        g.setGradientFill (ColourGradient (Colour (0xff3a3833), r.getX(), r.getY(), Colour (0xff0d0c0b), r.getX(), r.getBottom(), false));
+        g.fillRoundedRectangle (r, 5.0f);
+        g.setColour (lit ? kLine.brighter (0.2f) : Colours::black);
+        g.drawRoundedRectangle (r, 5.0f, lit ? 2.0f : 1.0f);
+    };
+    // display
+    auto d = nameR();
+    g.setColour (Colour (0xff0b0a08)); g.fillRoundedRectangle (d, 6.0f);
+    g.setColour (kLine); g.drawRoundedRectangle (d.reduced (0.5f), 6.0f, 1.6f);
+    g.setColour (kPrint.withMultipliedBrightness (0.6f));
+    g.setFont (Fonts::get().label (9.0f));
+    g.drawText ("PRESET", d.withTrimmedLeft (12.0f).withHeight (20.0f).translated (0, 4), Justification::centredLeft, false);
+    g.setColour (kPrint);
+    g.setFont (Fonts::get().label (14.0f));
+    g.drawFittedText (shownName + (shownMod ? "  *" : ""), d.reduced (12.0f, 0.0f).withTrimmedTop (14.0f).toNearestInt(),
+                      Justification::centredLeft, 1, 0.7f);
+    // ▾ menu
+    {
+        Path tri; const float cx = d.getRight() - 16.0f, cy = d.getCentreY() + 5.0f;
+        tri.addTriangle (cx - 5, cy - 3, cx + 5, cy - 3, cx, cy + 3);
+        g.setColour (kPrint.withMultipliedBrightness (0.7f)); g.fillPath (tri);
+    }
+    // ◀ ▶
+    for (int i = 0; i < 2; ++i)
+    {
+        auto r = i == 0 ? prevR() : nextR();
+        button (r, false);
+        Path t; const auto c = r.getCentre();
+        if (i == 0) t.addTriangle (c.x + 5, c.y - 7, c.x + 5, c.y + 7, c.x - 6, c.y);
+        else        t.addTriangle (c.x - 5, c.y - 7, c.x - 5, c.y + 7, c.x + 6, c.y);
+        g.setColour (kPrint); g.fillPath (t);
+    }
+    // A/B
+    {
+        auto r = abR(); button (r, shownB);
+        auto half = r.reduced (6.0f, 0.0f);
+        auto ra = half.removeFromLeft (half.getWidth() * 0.5f);
+        g.setFont (Fonts::get().label (14.0f));
+        g.setColour (shownB ? kPrint.withMultipliedBrightness (0.45f) : kPrint);
+        g.drawText ("A", ra, Justification::centred, false);
+        g.setColour (shownB ? kPrint : kPrint.withMultipliedBrightness (0.45f));
+        g.drawText ("B", half, Justification::centred, false);
+    }
+    // SALVA
+    {
+        auto r = saveR(); button (r, false);
+        g.setColour (kPrint); g.setFont (Fonts::get().label (11.5f));
+        g.drawText ("SALVA", r, Justification::centred, false);
+    }
+}
+
+void PresetBar::refresh()
+{
+    const auto n = proc.currentPresetName();
+    const bool mod = proc.presetModified(), b = proc.isOnB();
+    if (n != shownName || mod != shownMod || b != shownB) { shownName = n; shownMod = mod; shownB = b; repaint(); }
+}
+
+void PresetBar::mouseDown (const MouseEvent& e)
+{
+    const auto p = e.position;
+    if (abR().contains (p))
+    {
+        if (e.mods.isPopupMenu())
+        {
+            PopupMenu m;
+            m.addItem (1, proc.isOnB() ? "Copia B in A" : "Copia A in B");
+            m.showMenuAsync (PopupMenu::Options().withTargetComponent (this), [this] (int r) { if (r == 1) proc.copyCurrentToOther(); });
+        }
+        else proc.toggleAB();
+    }
+    else if (prevR().contains (p)) proc.stepPreset (-1);
+    else if (nextR().contains (p)) proc.stepPreset (1);
+    else if (saveR().contains (p)) save();
+    else if (nameR().contains (p)) showMenu();
+    refresh();
+}
+
+void PresetBar::showMenu()
+{
+    PopupMenu m, um;
+    const auto& list = ds::presets::factory();
+    const auto users = proc.userPresets();
+    for (int i = 0; i < users.size(); ++i)
+        um.addItem (1000 + i, users[i].getFileNameWithoutExtension(), true, users[i].getFileNameWithoutExtension() == proc.currentPresetName());
+    if (users.isEmpty()) um.addItem (999, "(nessun preset salvato)", false);
+    m.addSectionHeader ("Preset di fabbrica");
+    for (int i = 0; i < (int) list.size(); ++i)
+        m.addItem (1 + i, String::fromUTF8 (list[(size_t) i].name), true, proc.currentPresetName() == String::fromUTF8 (list[(size_t) i].name));
+    m.addSeparator();
+    m.addSubMenu ("Preset utente", um, true);
+    m.addSeparator();
+    m.addItem (2000, "Salva come...");
+    m.addItem (2001, "Mostra la cartella dei preset");
+    m.addItem (2002, proc.isOnB() ? "Copia B in A" : "Copia A in B");
+    m.showMenuAsync (PopupMenu::Options().withTargetComponent (this), [this, users] (int r)
+    {
+        if (r >= 1 && r < 1000) proc.loadFactory (r - 1);
+        else if (r >= 1000 && r < 2000) proc.loadUserPreset (users[r - 1000]);
+        else if (r == 2000) save();
+        else if (r == 2001) { DsProcessor::userPresetFolder().createDirectory(); DsProcessor::userPresetFolder().revealToUser(); }
+        else if (r == 2002) proc.copyCurrentToOther();
+        refresh();
+    });
+}
+
+void PresetBar::save()
+{
+    auto folder = DsProcessor::userPresetFolder();
+    folder.createDirectory();
+    chooser = std::make_unique<FileChooser> ("Salva il preset", folder.getChildFile (proc.currentPresetName() + ".dissona2"), "*.dissona2");
+    chooser->launchAsync (FileBrowserComponent::saveMode | FileBrowserComponent::canSelectFiles | FileBrowserComponent::warnAboutOverwriting,
+                          [this] (const FileChooser& fc)
+    {
+        const auto f = fc.getResult();
+        if (f != File()) proc.saveUserPreset (f);
+        refresh();
+    });
+}
+
+//==============================================================================
 Keys::Keys (MidiKeyboardState& s) : MidiKeyboardComponent (s, horizontalKeyboard)
 {
     setAvailableRange (41, 84);           // 44 tasti, dal FA al DO, come l'originale
@@ -438,7 +659,7 @@ void Keys::drawBlackNote (int, Graphics& g, Rectangle<float> a, bool down, bool,
 }
 
 //==============================================================================
-Panel::Panel (DsProcessor& p) : proc (p), keys (p.keyboardState), lever (p, *this)
+Panel::Panel (DsProcessor& p) : proc (p), keys (p.keyboardState), lever (p, *this), presetBar (p)
 {
     setSize (W, H);
 
@@ -523,6 +744,31 @@ Panel::Panel (DsProcessor& p) : proc (p), keys (p.keyboardState), lever (p, *thi
     lever.setBounds (Rectangle<int> (150, 120).withCentre ({ 150, 870 }));
 
     logoArea = { 1150.0f, 532.0f, 490.0f, 56.0f };
+
+    // ingresso esterno (AUX): livello e modo del VCA
+    {
+        auto* k = knobs.add (new Knob (*this, pid::extVol, false));
+        addAndMakeVisible (k);
+        k->radius = 16.0f; k->showTicks = true;
+        k->setBounds (Rectangle<int> (40, 40).withCentre ({ 744, 580 }));
+        k->setTooltip (String::fromUTF8 ("EXT. INPUT: livello dell'ingresso audio esterno verso il filtro (in una DAW: ingresso sidechain)"));
+        sliderAtt.add (new AudioProcessorValueTreeState::SliderAttachment (proc.apvts, pid::extVol, *k));
+        k->defaultValue = 0.0;
+        auto* t = toggles.add (new Toggle (*this, pid::extOpen, true, false));
+        addAndMakeVisible (t);
+        t->setBounds (Rectangle<int> (46, 46).withCentre ({ 884, 580 }));
+        t->setTooltip (String::fromUTF8 ("VCA per l'ingresso esterno: GATE = si apre con la tastiera (come l'originale), OPEN = sempre aperto (DISSONA 2 come filtro)"));
+        buttonAtt.add (new AudioProcessorValueTreeState::ButtonAttachment (proc.apvts, pid::extOpen, *t));
+    }
+
+    addAndMakeVisible (presetBar);
+    presetBar.setBounds (70, 538, 600, 56);
+    presetBar.setTooltip (String::fromUTF8 ("Preset: ◀ ▶ per scorrerli, clic sul nome per l'elenco, A/B per confrontare due versioni (clic destro: copia), SALVA per i tuoi suoni"));
+    presetBar.refresh();
+
+    addChildComponent (bubble);
+    bubble.setInterceptsMouseClicks (false, false);
+    bubble.setSize (190, 46);
     startTimerHz (30);
 }
 
@@ -536,6 +782,7 @@ void Panel::addKnob (const KnobSpec& s)
     k->setBounds (Rectangle<int> (52, 52).withCentre ({ (int) s.x, (int) s.y }));
     k->setTooltip (String::fromUTF8 (s.tip));
     sliderAtt.add (new AudioProcessorValueTreeState::SliderAttachment (proc.apvts, s.id, *k));
+    if (auto* p = proc.apvts.getParameter (s.id)) k->defaultValue = p->convertFrom0to1 (p->getDefaultValue());
 }
 
 void Panel::addSelector (const SelSpec& s)
@@ -567,6 +814,7 @@ void Panel::addFader (const FadSpec& s)
                           : Rectangle<int> (40, len).withCentre ({ (int) s.x, (int) s.y }));
     f->setTooltip (String::fromUTF8 (s.tip));
     sliderAtt.add (new AudioProcessorValueTreeState::SliderAttachment (proc.apvts, s.id, *f));
+    if (auto* p = proc.apvts.getParameter (s.id)) f->defaultValue = p->convertFrom0to1 (p->getDefaultValue());
 }
 
 //==============================================================================
@@ -835,6 +1083,18 @@ void Panel::paint (Graphics& g)
         g.fillPath (p);
     }
 
+    // ------------------------------------------------ sezione EXT. INPUT (aggiunta di DISSONA 2)
+    {
+        g.setColour (kLine);
+        g.drawRoundedRectangle (Rectangle<float> (700, 532, 260, 76), 14.0f, 2.2f);
+        g.setColour (kPrint);
+        text (g, "EXT. INPUT", { 830, 548 }, 11.0f);
+        text (g, "GATE", { 846, 584 }, 9.5f);
+        text (g, "OPEN", { 922, 584 }, 9.5f);
+        text (g, "VCA", { 884, 604 }, 8.5f);
+        text (g, "LEVEL", { 744, 604 }, 8.5f);
+    }
+
     // ------------------------------------------------ targa DISSONA 2 (stile CRUMAR: lettere slab in caselle inclinate)
     {
         const float bw = 54.0f, bh = 56.0f, gap = 7.0f, sl = 0.14f;
@@ -897,7 +1157,40 @@ void Panel::timerCallback()
     if (l1 != led1) { led1 = l1; repaint (Rectangle<int> (60, 60).withCentre ({ 632, 72 })); }
     if (l2 != led2) { led2 = l2; repaint (Rectangle<int> (60, 60).withCentre ({ 1040, 72 })); }
     lever.refresh();
+    presetBar.refresh();
+    if (bubble.isVisible() && bubbleParam.isNotEmpty())
+        if (auto* p = proc.apvts.getParameter (bubbleParam))
+            if (const auto v = p->getCurrentValueAsText(); v != bubble.value) { bubble.value = v; bubble.repaint(); }
     if (learnId.isNotEmpty() && proc.learningIndex() < 0) { learnId.clear(); repaintControls(); }
+}
+
+void Panel::showValue (Component& c, const String& id, bool show)
+{
+    if (! show)
+    {
+        if (bubbleFor == &c) { bubble.setVisible (false); bubbleFor = nullptr; bubbleParam.clear(); }
+        return;
+    }
+    auto* p = proc.apvts.getParameter (id);
+    if (p == nullptr) return;
+    bubbleFor = &c;
+    bubbleParam = id;
+    bubble.title = p->getName (40).toUpperCase();
+    bubble.value = p->getCurrentValueAsText();
+    placeBubble();
+    bubble.setVisible (true);
+    bubble.toFront (false);
+    bubble.repaint();
+}
+
+void Panel::placeBubble()
+{
+    if (bubbleFor == nullptr) return;
+    const auto r = bubbleFor->getBounds();
+    auto b = bubble.getBounds().withCentre ({ r.getCentreX(), r.getY() - bubble.getHeight() / 2 - 6 });
+    if (b.getY() < 4) b.setY (r.getBottom() + 6);
+    b.setX (jlimit (4, W - b.getWidth() - 4, b.getX()));
+    bubble.setBounds (b);
 }
 
 void Panel::repaintControls()
@@ -965,12 +1258,36 @@ void Panel::showSettingsMenu()
     PopupMenu qm;
     qm.addItem (600, "Normale (meno CPU)", true, val (pid::quality) < 0.5f);
     qm.addItem (601, "Alta (sovracampionamento doppio)", true, val (pid::quality) > 0.5f);
+    PopupMenu pm;
+    pm.addItem (800, String::fromUTF8 ("Più acuta (predefinita)"), true, val (pid::priority) < 0.5f);
+    pm.addItem (801, String::fromUTF8 ("Più grave"), true, std::lround (val (pid::priority)) == 1);
+    pm.addItem (802, "Ultima suonata", true, std::lround (val (pid::priority)) == 2);
+    PopupMenu am;
+    const float a4 = val (pid::tune);
+    static const float tunes[] = { 430, 432, 435, 438, 439, 440, 441, 442, 443, 444, 445, 450 };
+    for (int i = 0; i < 12; ++i)
+        am.addItem (900 + i, String (tunes[i], 0) + " Hz" + (tunes[i] == 440.0f ? " (standard)" : ""), true, std::abs (a4 - tunes[i]) < 0.05f);
+    am.addSeparator();
+    am.addItem (950, String::fromUTF8 ("Più alto di 1 cent"));
+    am.addItem (951, String::fromUTF8 ("Più basso di 1 cent"));
+    PopupMenu tol;
+    tol.addItem (1000, "Attive (questo esemplare)", true, val (pid::tolerances) > 0.5f);
+    tol.addItem (1001, "Spente (strumento ideale)", true, val (pid::tolerances) < 0.5f);
+    tol.addSeparator();
+    tol.addItem (1002, "Nuovo esemplare (altre tolleranze)");
+    PopupMenu pd;
+    static const char* pedals[] = { "Spento", "2 ottave", "4 ottave", "6 ottave" };
+    for (int i = 0; i < 4; ++i) pd.addItem (1100 + i, pedals[i], true, std::lround (val (pid::pedalRange)) == i);
 
     PopupMenu m;
     m.addSectionHeader ("DISSONA 2  -  Collateral Effects");
     m.addSubMenu ("Pitch bend MIDI", bm);
     m.addSubMenu ("Estensione della tastiera", km);
     m.addSubMenu ("Trigger degli inviluppi", tm);
+    m.addSubMenu (String::fromUTF8 ("Priorità delle note MONO"), pm);
+    m.addSubMenu ("Accordatura: La = " + String (a4, 1) + " Hz", am);
+    m.addSubMenu ("Tolleranze analogiche", tol);
+    m.addSubMenu ("Pedale del filtro (CC 11)", pd);
     m.addSubMenu ("Deviatore VCF / VCA", vm);
     m.addSubMenu ("Uscite", om);
     m.addSubMenu ("Qualita audio", qm);
@@ -985,6 +1302,16 @@ void Panel::showSettingsMenu()
         else if (r == 400 || r == 401) set (pid::vcaSwMode, (float) (r - 400));
         else if (r == 500 || r == 501) set (pid::polySplit, (float) (r - 500));
         else if (r == 600 || r == 601) set (pid::quality, (float) (r - 600));
+        else if (r >= 800 && r <= 802) set (pid::priority, (float) (r - 800));
+        else if (r >= 900 && r < 912) { static const float t[] = { 430, 432, 435, 438, 439, 440, 441, 442, 443, 444, 445, 450 }; set (pid::tune, t[r - 900]); }
+        else if (r == 950 || r == 951)
+        {
+            const float cur = proc.apvts.getRawParameterValue (pid::tune)->load();
+            set (pid::tune, jlimit (430.0f, 450.0f, cur * std::pow (2.0f, (r == 950 ? 1.0f : -1.0f) / 1200.0f)));
+        }
+        else if (r == 1000 || r == 1001) set (pid::tolerances, r == 1000 ? 1.0f : 0.0f);
+        else if (r == 1002) proc.newInstanceSeed();
+        else if (r >= 1100 && r <= 1103) set (pid::pedalRange, (float) (r - 1100));
         else if (r == 700) proc.resetDefaultMapping();
         else if (r == 701) proc.cancelLearn();
         repaintControls();

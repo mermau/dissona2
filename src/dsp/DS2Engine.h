@@ -88,6 +88,14 @@ struct EngineParams
     bool  retrigger = false;
     bool  originalRange = false;             // solo i 44 tasti FA…DO (MIDI 41…84)
     bool  polySplit = false;                 // uscita POLY separata (canale destro)
+    // aggiunte (non presenti sul pannello originale)
+    float extVol = 0.0f;                     // ingresso esterno AUX verso il filtro
+    bool  extOpen = false;                   // VCA sempre aperto per l'ingresso esterno
+    int   priority = 0;                      // 0 = nota più acuta, 1 = più grave, 2 = ultima
+    float pedal = 0.0f;                      // pedale del filtro (0 … 1)
+    float pedalOct = 4.0f;                   // escursione del pedale in ottave
+    float tuneA4 = 440.0f;                   // accordatura generale
+    bool  tolerances = true;                 // tolleranze analogiche dell'esemplare
 };
 
 //==============================================================================================
@@ -194,6 +202,41 @@ struct Biquad
 };
 
 //==============================================================================================
+// Tolleranze di un esemplare: piccole differenze fisse dei componenti analogici (resistenze al 5 %,
+// condensatori al 10-20 %, OTA e transistor non selezionati). Ricavate da un seme, quindi ogni
+// istanza è uno "strumento" diverso ma sempre uguale a sé stesso.
+struct Tolerances
+{
+    float lfo1 = 1, lfo2 = 1;              // frequenza degli LFO (reostati e 470 nF)
+    float cutOct = 0, resK = 1;            // offset del taglio (ottave) e guadagno della risonanza
+    float envF[3] { 1, 1, 1 }, envA[3] { 1, 1, 1 };   // tempi A, D, R dei due ADSR (4,7 µF)
+    float sus = 1;                         // riferimento 4,3 V del sustain
+    float clk1 = 1, clk2 = 1, clkPoly = 1; // master clock (74LS221: 150 pF e 3K3)
+    float glide = 1, delay = 1;            // clock del glide e rampa del delay
+    float mix[4] { 1, 1, 1, 1 };           // resistenze di somma OSC1, OSC2, NOISE, POLY
+    float lfoDepth = 1;                    // guadagno del mixer degli LFO
+
+    static Tolerances fromSeed (uint32_t seed)
+    {
+        Tolerances t;
+        uint32_t s = seed ? seed : 0x2545f491u;
+        auto u = [&s] { s ^= s << 13; s ^= s >> 17; s ^= s << 5; return (float) ((double) s / 4294967296.0) * 2.0f - 1.0f; };
+        t.lfo1 = 1.0f + 0.06f * u(); t.lfo2 = 1.0f + 0.06f * u();
+        t.cutOct = 0.08f * u(); t.resK = 1.0f + 0.02f * u();
+        for (auto& e : t.envF) e = 1.0f + 0.08f * u();
+        for (auto& e : t.envA) e = 1.0f + 0.08f * u();
+        t.sus = 1.0f + 0.02f * u();
+        // il clock è un monostabile: deriva di pochi cent, poi corretta col PITCH come sull'originale
+        t.clk1 = std::exp2 (2.5f * u() / 1200.0f); t.clk2 = std::exp2 (2.5f * u() / 1200.0f);
+        t.clkPoly = std::exp2 (2.0f * u() / 1200.0f);
+        t.glide = 1.0f + 0.08f * u(); t.delay = 1.0f + 0.08f * u();
+        for (auto& m : t.mix) m = 1.0f + 0.04f * u();
+        t.lfoDepth = 1.0f + 0.05f * u();
+        return t;
+    }
+};
+
+//==============================================================================================
 // Generatore d'inviluppo P-440 (valori in volt sul condensatore da 4,7 µF)
 class Envelope
 {
@@ -204,16 +247,19 @@ public:
     void reset() { v = -0.6f; stage = Stage::Release; }
     void trigger() { stage = Stage::Attack; }
 
-    void set (float a, float d, float s, float r)
+    void set (float a, float d, float s, float r, const float* tol = nullptr, float susTol = 1.0f)
     {
-        if (a == last[0] && d == last[1] && s == last[2] && r == last[3]) return;
+        const float ta = tol ? tol[0] : 1.0f, td = tol ? tol[1] : 1.0f, tr = tol ? tol[2] : 1.0f;
+        if (a == last[0] && d == last[1] && s == last[2] && r == last[3] && ta == lastTol[0] && td == lastTol[1]
+            && tr == lastTol[2] && susTol == lastTol[3]) return;
         last = { a, d, s, r };
+        lastTol = { ta, td, tr, susTol };
         constexpr double C = 4.7e-6, rOn = 900.0;                       // 4016 a 5 V
-        kA = coef ((rOn + 1.0e6 * logTaper (a)) * C);
+        kA = coef ((rOn + 1.0e6 * logTaper (a)) * C * ta);
         const double wiper = 5000.0 * s * (1.0 - s);                     // resistenza vista dal cursore del sustain
-        kD = coef ((rOn + wiper + 1.0e6 * logTaper (d)) * C);
-        kR = coef ((rOn + 2200.0 + 1.0e6 * logTaper (r)) * C);
-        sus = kPeak * std::clamp (s, 0.0f, 1.0f);
+        kD = coef ((rOn + wiper + 1.0e6 * logTaper (d)) * C * td);
+        kR = coef ((rOn + 2200.0 + 1.0e6 * logTaper (r)) * C * tr);
+        sus = std::min (kPeak, kPeak * std::clamp (s, 0.0f, 1.0f) * susTol);
     }
 
     inline float tick (bool gate)
@@ -238,7 +284,7 @@ private:
     double fs = 96000.0;
     float v = -0.6f, kA = 0.01f, kD = 0.01f, kR = 0.01f, sus = 3.0f;
     Stage stage = Stage::Release;
-    std::array<float, 4> last { -1, -1, -1, -1 };
+    std::array<float, 4> last { -1, -1, -1, -1 }, lastTol { 1, 1, 1, 1 };
 };
 
 //==============================================================================================
@@ -257,9 +303,9 @@ public:
     // reostato da 1M a filo in serie a 10K: f = 30 Hz · 10K / (10K + R)
     static double rateHz (float knob) { return 30.0 * 10.0 / (10.0 + 990.0 * (1.0 - std::clamp ((double) knob, 0.0, 1.0))); }
 
-    inline void tick (float rate)
+    inline void tick (float rate, float mul = 1.0f)
     {
-        const double inc = 4.0 * rateHz (rate) / fs;
+        const double inc = 4.0 * rateHz (rate) * mul / fs;
         tri += dir * inc;
         if (tri >= 1.0)       { tri = 2.0 - tri;  dir = -1; }
         else if (tri <= -1.0) { tri = -2.0 - tri; dir = 1; count = (count + 1) & 15; }   // HBF4727 sul fronte
@@ -365,6 +411,11 @@ public:
         blep.reset();
     }
     void setKey (int m, bool down) { if (m >= 0 && m < 128) notes[(size_t) m].on = down; }
+    bool silent() const
+    {
+        for (auto& n : notes) if (n.on || n.g > 0.0f) return false;
+        return true;
+    }
     void allOff() { for (auto& n : notes) n.on = false; }
 
     // fin = frequenza d'ingresso del MK50240 (2,00024 MHz a 8')
@@ -515,7 +566,7 @@ public:
         lfo1.prepare (fs); lfo2.prepare (fs);
         poly.prepare (fs);
         vcf.prepare (fs);
-        for (auto* d : { &dc1, &dc2, &dcN, &dcP }) d->set (1.0, fs);    // 4,7 µF + 33K
+        for (auto* d : { &dc1, &dc2, &dcN, &dcP, &dcX }) d->set (1.0, fs);    // 4,7 µF + 33K
         dcOut.set (3.0, fs);
         // rete "pink" del LM307: −Zf / 100K
         {
@@ -532,7 +583,8 @@ public:
     {
         dco1.reset(); dco2.reset(); poly.reset(); vcf.reset();
         envF.reset(); envA.reset(); lfo1.reset(); lfo2.reset();
-        for (auto* d : { &dc1, &dc2, &dcN, &dcP, &dcOut }) d->reset();
+        for (auto* d : { &dc1, &dc2, &dcN, &dcP, &dcOut, &dcX }) d->reset();
+        quietSamples = 0; sleeping = false; clock = 0; stamp.fill (0);
         pink.reset(); whiteLp.reset(); lowSh.reset(); highSh.reset();
         held.fill (false); sustained.fill (false);
         gate = false; delayT = 0.0;
@@ -546,6 +598,7 @@ public:
     {
         if (m < 0 || m > 127 || ! inRange (m)) return;
         held[(size_t) m] = true;
+        stamp[(size_t) m] = ++clock;
         keysChanged();
     }
     void noteOff (int m)
@@ -563,11 +616,38 @@ public:
     void allNotesOff() { held.fill (false); sustained.fill (false); keysChanged(); }
 
     // ------------------------------------------------------------------- audio
-    // out: uscita principale; polyOut: uscita POLY separata (solo con polySplit)
-    void process (float* out, float* polyOut, int n)
+    // Tolleranze dell'esemplare (seme salvato con lo stato del plugin)
+    void setSeed (uint32_t seed) { tolSeed = Tolerances::fromSeed (seed); }
+
+    // Vero quando il motore può dormire: nessun tasto, inviluppi a riposo, POLY muta, nessuna
+    // modulazione che apra il VCA da sola e l'uscita già silenziosa da almeno 50 ms.
+    bool isSleeping() const { return sleeping; }
+
+    // out: uscita principale; polyOut: uscita POLY separata (solo con polySplit);
+    // ext: ingresso esterno AUX (mono) o nullptr
+    void process (float* out, float* polyOut, int n, const float* ext = nullptr)
     {
-        envF.set (p.vcfA, p.vcfD, p.vcfS, p.vcfR);
-        envA.set (p.vcaA, p.vcaD, p.vcaS, p.vcaR);
+        const Tolerances& t = p.tolerances ? tolSeed : tolNone;
+        envF.set (p.vcfA, p.vcfD, p.vcfS, p.vcfR, t.envF, t.sus);
+        envA.set (p.vcaA, p.vcaD, p.vcaS, p.vcaR, t.envA, t.sus);
+
+        // --- riposo: niente da calcolare (le fasi degli LFO avanzano comunque per i LED)
+        bool extActive = false;
+        if (ext != nullptr && p.extVol > 0.0f)
+            for (int i = 0; i < n && ! extActive; ++i) extActive = std::fabs (ext[i]) > 1.0e-5f;
+        const bool vcaFree = p.mxVcaSrc != 0 && p.mxVcaAmt > 0.0f;
+        const bool canRest = ! gate && ! envA.active() && ! envF.active() && poly.silent() && ! vcaFree
+                          && ! (extActive && p.extOpen) && gateLevel < 1.0e-4f;
+        if (canRest && quietSamples > (int) (0.05 * fs))
+        {
+            sleeping = true;
+            for (int i = 0; i < n; ++i) { lfo1.tick (p.lfo1Rate, t.lfo1); lfo2.tick (p.lfo2Rate, t.lfo2); }
+            std::fill (out, out + n, 0.0f);
+            if (polyOut != nullptr) std::fill (polyOut, polyOut + n, 0.0f);
+            return;
+        }
+        if (sleeping) { vcf.reset(); for (auto* d : { &dc1, &dc2, &dcN, &dcP, &dcOut, &dcX }) d->reset(); }
+        sleeping = false;
         if (p.polyLow != lastLow || p.polyHigh != lastHigh)
         {
             lastLow = p.polyLow; lastHigh = p.polyHigh;
@@ -577,7 +657,8 @@ public:
         const float smooth = (float) (1.0 - std::exp (-1.0 / (0.004 * fs)));
         const int d1 = 8 >> std::clamp (p.o1Range, 0, 3), d2 = 8 >> std::clamp (p.o2Range, 0, 3);
         const float k = Ds2Filter::feedbackFor (p.vcfRes);
-        const double glideHz = glideClock();
+        const double glideHz = glideClock() * t.glide;
+        const double tune = p.tuneA4 / 440.0;
 
         for (int i = 0; i < n; ++i)
         {
@@ -593,17 +674,19 @@ public:
             sP2  += (p.o2Pitch - sP2) * smooth;
             sPp  += (p.polyPitch - sPp) * smooth;
             sBend += (p.bend - sBend) * smooth;
+            sPed += (p.pedal - sPed) * smooth;
 
             // --- LFO e ritardo
-            lfo1.tick (p.lfo1Rate);
-            lfo2.tick (p.lfo2Rate);
-            if (gate) delayT += 1.0 / fs;
+            lfo1.tick (p.lfo1Rate, t.lfo1);
+            lfo2.tick (p.lfo2Rate, t.lfo2);
+            if (gate) delayT += 1.0 / (fs * t.delay);
             const float dly = delayGain();
             const float l1 = lfo1Wave() * (p.lfo1Delay ? dly : 1.0f);
             const float l2 = lfo2Wave() * (p.lfo2Delay ? dly : 1.0f);
 
             // --- LFO's MIXER (P-445)
-            auto src = [l1, l2] (int s) { return s == 1 ? l1 : s == 2 ? l2 : s == 3 ? 0.5f * (l1 + l2) : 0.0f; };
+            const float dep = t.lfoDepth;
+            auto src = [l1, l2, dep] (int s) { return dep * (s == 1 ? l1 : s == 2 ? l2 : s == 3 ? 0.5f * (l1 + l2) : 0.0f); };
             const float vib1 = 1.21f * src (p.mxO1Src) * (float) logTaper (p.mxO1Amt);
             const float vib2 = 1.21f * src (p.mxO2Src) * (float) logTaper (p.mxO2Amt);
             const float vcfMod = src (p.mxVcfSrc) * p.mxVcfAmt;
@@ -634,8 +717,8 @@ public:
 
             // --- DCO
             const double bendMul = std::exp2 (sBend * p.bendRange / 12.0);
-            const double c1 = kClock8 * std::exp2 (sP1 * 6.0 / 12.0) * bendMul * std::max (0.05, 1.0 + 0.6 * vib1);
-            const double c2 = kClock8 * std::exp2 (sP2 * 9.0 / 12.0) * bendMul * std::max (0.05, 1.0 + 0.6 * vib2);
+            const double c1 = kClock8 * tune * t.clk1 * std::exp2 (sP1 * 6.0 / 12.0) * bendMul * std::max (0.05, 1.0 + 0.6 * vib1);
+            const double c2 = kClock8 * tune * t.clk2 * std::exp2 (sP2 * 9.0 / 12.0) * bendMul * std::max (0.05, 1.0 + 0.6 * vib2);
             int n1, t1, n2, t2;
             splitCode (codeNow, d1, n1, t1);
             splitCode (codeNow, d2, n2, t2);
@@ -643,7 +726,7 @@ public:
             const float o2 = dco2.tick (c2 / fs, n2, t2, std::clamp (p.o2Wave, 0, 2), pw);
 
             // --- POLY
-            const double fin = kMk8 * (p.polyOct == 0 ? 0.5 : p.polyOct == 2 ? 2.0 : 1.0)
+            const double fin = kMk8 * tune * t.clkPoly * (p.polyOct == 0 ? 0.5 : p.polyOct == 2 ? 2.0 : 1.0)
                              * std::exp2 (sPp * 4.0 / 12.0) * std::max (0.05, 1.0 + 0.6 * polyMod);
             float pl = poly.tick (fin);
             pl = highSh.tick (lowSh.tick (pl)) * 1.8f * loadedPot (sVp, 10.0f, 100.0f);
@@ -654,25 +737,30 @@ public:
             const float nz = dcN.tick (p.noisePink ? pink.tick (w) * 0.9f : w) * 1.2f;
 
             // --- mixer d'ingresso del VCF (volt prima dei 33K)
-            float x = dc1.tick (o1 * 5.0f) * loadedPot (sV1, 33.0f, 100.0f)
-                    + dc2.tick (o2 * 5.0f) * loadedPot (sV2, 33.0f, 100.0f)
-                    + nz * loadedPot (sVn, 33.0f, 100.0f);
+            sVx += (p.extVol - sVx) * smooth;
+            float x = dc1.tick (o1 * 5.0f) * loadedPot (sV1, 33.0f, 100.0f) * t.mix[0]
+                    + dc2.tick (o2 * 5.0f) * loadedPot (sV2, 33.0f, 100.0f) * t.mix[1]
+                    + nz * loadedPot (sVn, 33.0f, 100.0f) * t.mix[2];
             const bool polyToFilter = p.polyOn && ! p.polySplit;
-            if (polyToFilter) x += pl;
+            if (polyToFilter) x += pl * t.mix[3];
+            // ingresso AUX (BUSS B pin 8): 0 dBFS ≈ 5 V picco, potenziometro da 50K come suggerito da Bassi
+            if (ext != nullptr) x += dcX.tick (ext[i] * 5.0f) * loadedPot (sVx, 33.0f, 50.0f);
 
             // --- VCF
             double oct = 10.55 * std::pow ((double) std::clamp (sCut, 0.0f, 1.0f), 0.48)
-                       + 9.0 * (double) (p.vcfEnv * eF) + 1.5 * (double) vcfMod;
+                       + 9.0 * (double) (p.vcfEnv * eF) + 1.5 * (double) vcfMod
+                       + (double) (p.pedalOct * sPed) + (double) t.cutOct;
             double fc = 16.0 * std::exp2 (oct);
             if (p.kbdCtrl) fc *= 1.393 * (double) codeNow / 4095.0;
             fc = std::clamp (fc, 4.0, 0.45 * fs);
-            const float yf = vcf.tick (x, fc, sK);
+            const float yf = vcf.tick (x, fc, sK * t.resK);
 
             // --- VCA
             float envSel;
             if (p.vcaSwMode == 0) envSel = p.vcaIn ? eF : eA;
             else { gateLevel += ((gate ? 1.0f : 0.0f) - gateLevel) * smooth; envSel = p.vcaIn ? eA : gateLevel; }
-            const float cv = std::max (0.0f, p.vcaEnv * std::max (envSel, 0.0f) + 0.5f * vcaMod);
+            float cv = std::max (0.0f, p.vcaEnv * std::max (envSel, 0.0f) + 0.5f * vcaMod);
+            if (p.extOpen && ext != nullptr && p.extVol > 0.0f) cv = std::max (cv, 1.0f);
             constexpr float Sv = 24.5f;
             float y = cv * Sv * fastTanh (yf / Sv);
 
@@ -680,6 +768,7 @@ public:
             y = dcOut.tick (y) * 0.075f * loadedPot (sVol, 517.0f, 50.0f);
             if (p.headphones) y = 1.2f * fastTanh (y * 2.0f / 1.2f);
             out[i] = y;
+            quietSamples = std::fabs (y) < 3.0e-5f ? quietSamples + 1 : 0;   // -90 dBFS
             if (polyOut != nullptr)
                 polyOut[i] = (p.polyOn && p.polySplit) ? 0.06f * pl * loadedPot (sVol, 517.0f, 50.0f) : 0.0f;
         }
@@ -699,11 +788,16 @@ private:
     {
         int top = -1;
         bool any = false;
+        uint64_t newest = 0;
         for (int m = 127; m >= 0; --m)
         {
             const bool on = held[(size_t) m] || sustained[(size_t) m];
             poly.setKey (m, on);
-            if (on) { any = true; if (top < 0) top = m; }
+            if (! on) continue;
+            any = true;
+            if (p.priority == 1) top = m;                                        // più grave
+            else if (p.priority == 2) { if (stamp[(size_t) m] >= newest) { newest = stamp[(size_t) m]; top = m; } }  // ultima
+            else if (top < 0) top = m;                                           // più acuta
         }
         const bool wasGate = gate;
         gate = any;
@@ -773,12 +867,18 @@ private:
     Dco dco1, dco2;
     PolySection poly;
     Ds2Filter vcf;
-    DcBlock dc1, dc2, dcN, dcP, dcOut;
+    DcBlock dc1, dc2, dcN, dcP, dcOut, dcX;
     Biquad pink, whiteLp, lowSh, highSh;
     Rng noise { 0x9e3779b9u };
     float lastLow = 99.0f, lastHigh = 99.0f;
 
     std::array<bool, 128> held {}, sustained {};
+    std::array<uint64_t, 128> stamp {};
+    uint64_t clock = 0;
+    Tolerances tolSeed, tolNone;
+    bool sleeping = false;
+    int quietSamples = 0;
+    float sVx = 0.0f, sPed = 0.0f;
     bool sustainPedal = false, gate = false;
     int lastNote = 60;
     int64_t codeNow = 1, codeTarget = 1;
