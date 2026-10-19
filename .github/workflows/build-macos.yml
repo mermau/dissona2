@@ -61,6 +61,7 @@ jobs:
           cp scripts/installa.command "dist/DISSONA-2/Installa DISSONA 2.command"
           chmod +x "dist/DISSONA-2/Installa DISSONA 2.command"
           cp README.md dist/DISSONA-2/LEGGIMI.md
+          cp "docs/DISSONA 2 - Manuale d'uso.pdf" dist/DISSONA-2/
           (cd dist && ditto -c -k --keepParent DISSONA-2 DISSONA-2-macOS.zip)
 
       - uses: actions/upload-artifact@v4
