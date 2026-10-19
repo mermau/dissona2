@@ -1,0 +1,78 @@
+name: Build macOS
+
+on:
+  push:
+    branches: [ main ]
+    tags: [ 'v*' ]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache JUCE
+        uses: actions/cache@v4
+        with:
+          path: build/_deps
+          key: juce-8.0.4-${{ runner.os }}
+
+      - name: Configura (binario universale Apple Silicon + Intel)
+        run: |
+          cmake -B build -G "Unix Makefiles" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0
+
+      - name: Compila VST3, AU e Standalone
+        run: cmake --build build --config Release --target DS78_VST3 DS78_AU DS78_Standalone -j 4
+
+      - name: Test del motore DSP
+        run: |
+          c++ -O2 -std=c++17 -Isrc tests/engine_test.cpp -o engine_test
+          mkdir -p test-audio && ./engine_test test-audio
+
+      - name: Firma ad-hoc
+        run: |
+          A=build/DS78_artefacts/Release
+          codesign --force --deep --sign - "$A/VST3/DS-78.vst3"
+          codesign --force --deep --sign - "$A/AU/DS-78.component"
+          codesign --force --deep --sign - "$A/Standalone/DS-78.app"
+          codesign --verify --deep --strict "$A/Standalone/DS-78.app"
+
+      - name: Validazione Audio Unit (auval)
+        continue-on-error: true
+        run: |
+          mkdir -p ~/Library/Audio/Plug-Ins/Components
+          cp -R build/DS78_artefacts/Release/AU/DS-78.component ~/Library/Audio/Plug-Ins/Components/
+          killall -9 AudioComponentRegistrar 2>/dev/null || true
+          auval -v aumu Ds78 Clfx
+
+      - name: Pacchetto
+        run: |
+          A=build/DS78_artefacts/Release
+          mkdir -p dist/DS-78
+          cp -R "$A/VST3/DS-78.vst3" "$A/AU/DS-78.component" "$A/Standalone/DS-78.app" dist/DS-78/
+          cp scripts/installa.command "dist/DS-78/Installa DS-78.command"
+          chmod +x "dist/DS-78/Installa DS-78.command"
+          cp README.md dist/DS-78/LEGGIMI.md
+          (cd dist && ditto -c -k --keepParent DS-78 DS-78-macOS.zip)
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: DS-78-macOS
+          path: |
+            dist/DS-78-macOS.zip
+            test-audio/*.wav
+
+      - name: Release (solo sui tag v*)
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" dist/DS-78-macOS.zip --title "DS-78 ${GITHUB_REF_NAME}" --notes "Build macOS universale (Apple Silicon + Intel) - VST3, AU e Standalone."
