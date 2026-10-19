@@ -269,16 +269,46 @@ void Toggle::paintButton (Graphics& g, bool over, bool)
     g.fillPath (nut);
     g.setColour (Colours::black.withAlpha (0.6f)); g.strokePath (nut, PathStrokeType (0.8f));
     g.setColour (Colour (0xff111111)); g.fillEllipse (c.x - 5.0f, c.y - 5.0f, 10.0f, 10.0f);
-    // levetta
+    // collare filettato attorno al foro
+    g.setGradientFill (ColourGradient (Colour (0xffc9c5bd), c.x - 6, c.y - 6, Colour (0xff3c3a36), c.x + 6, c.y + 6, false));
+    g.fillEllipse (c.x - 6.5f, c.y - 6.5f, 13.0f, 13.0f);
+    g.setColour (Colour (0xff0c0c0c)); g.fillEllipse (c.x - 3.6f, c.y - 3.6f, 7.2f, 7.2f);
+
+    // levetta: esce dal foro verso chi guarda ed è inclinata di ~20° verso la posizione scelta,
+    // quindi vista di fronte appare corta (in scorcio) con la punta arrotondata più grande
     const bool atFirst = getToggleState() == onFirst;
-    Point<float> dir = horiz ? Point<float> (atFirst ? -1.0f : 1.0f, 0.0f) : Point<float> (0.0f, atFirst ? -1.0f : 1.0f);
-    const auto end = c + dir * 17.0f;
-    g.setColour (Colours::black.withAlpha (0.45f));
-    g.drawLine (Line<float> (c.translated (2, 3), end.translated (2, 3)), 6.0f);
-    g.setGradientFill (ColourGradient (Colour (0xfff2f0ea), c.x, c.y, Colour (0xff8d8a83), end.x, end.y, false));
-    g.drawLine (Line<float> (c, end), 5.5f);
-    g.setColour (Colour (0xffe8e5de)); g.fillEllipse (end.x - 4.5f, end.y - 4.5f, 9.0f, 9.0f);
-    g.setColour (Colours::black.withAlpha (0.4f)); g.drawEllipse (end.x - 4.5f, end.y - 4.5f, 9.0f, 9.0f, 0.8f);
+    const Point<float> dir = horiz ? Point<float> (atFirst ? -1.0f : 1.0f, 0.0f) : Point<float> (0.0f, atFirst ? -1.0f : 1.0f);
+    const Point<float> nrm (-dir.y, dir.x);
+    const float reach = 9.0f;                         // proiezione della leva sul pannello
+    const auto tip = c + dir * reach;
+
+    // ombra portata sul pannello (luce dall'alto a sinistra): più lunga della leva
+    {
+        Path sh;
+        const auto s0 = c.translated (1.5f, 2.0f), s1 = c + dir * (reach + 9.0f) + Point<float> (4.0f, 6.0f);
+        sh.startNewSubPath (s0 + nrm * 2.0f); sh.lineTo (s1 + nrm * 3.5f); sh.lineTo (s1 - nrm * 3.5f); sh.lineTo (s0 - nrm * 2.0f); sh.closeSubPath();
+        g.setColour (Colours::black.withAlpha (0.38f)); g.fillPath (sh);
+        g.setColour (Colours::black.withAlpha (0.30f)); g.fillEllipse (Rectangle<float> (9.0f, 9.0f).withCentre (s1));
+    }
+    // fusto rastremato (stretto alla base, più largo verso la punta)
+    {
+        Path stem;
+        stem.startNewSubPath (c + nrm * 2.2f); stem.lineTo (tip + nrm * 3.4f); stem.lineTo (tip - nrm * 3.4f); stem.lineTo (c - nrm * 2.2f); stem.closeSubPath();
+        g.setGradientFill (ColourGradient (Colour (0xfff4f2ec), (c + nrm * 3.0f).x, (c + nrm * 3.0f).y,
+                                           Colour (0xff77746d), (c - nrm * 3.0f).x, (c - nrm * 3.0f).y, false));
+        g.fillPath (stem);
+        g.setColour (Colours::black.withAlpha (0.35f)); g.strokePath (stem, PathStrokeType (0.6f));
+    }
+    // punta sferica, la parte più vicina all'osservatore
+    {
+        const float r = 5.6f;
+        auto ball = Rectangle<float> (r * 2.0f, r * 2.0f).withCentre (tip);
+        g.setGradientFill (ColourGradient (Colour (0xffffffff), tip.x - r * 0.45f, tip.y - r * 0.5f,
+                                           Colour (0xff6f6c66), tip.x + r, tip.y + r, true));
+        g.fillEllipse (ball);
+        g.setColour (Colours::black.withAlpha (0.45f)); g.drawEllipse (ball, 0.7f);
+        g.setColour (Colours::white.withAlpha (0.85f)); g.fillEllipse (tip.x - r * 0.55f, tip.y - r * 0.6f, r * 0.55f, r * 0.45f);
+    }
     if (over) { g.setColour (Colours::white.withAlpha (0.06f)); g.fillEllipse (b.reduced (2.0f)); }
     if (host.isLearning (paramId)) { g.setColour (Colour (0xffff3b30)); g.drawEllipse (b.reduced (1.0f), 2.0f); }
 }
