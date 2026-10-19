@@ -84,6 +84,61 @@ void screw (Graphics& g, Point<float> c, float r = 6.5f)
 }
 
 const std::vector<String> kSrc { "OUT", "1", "2", "1+2" };
+
+// Carattere squadrato a tratti spezzati, come "DIGITAL SYNTHESIZER DS 2" sul pannello del DS-2
+// (griglia 4 x 6; ogni glifo è un insieme di spezzate).
+struct DigiGlyph { char c; std::vector<std::vector<Point<float>>> lines; };
+const std::vector<DigiGlyph>& digiGlyphs()
+{
+    using P = Point<float>;
+    static const std::vector<DigiGlyph> g {
+        { 'D', { { P (0,0), P (3,0), P (4,1), P (4,5), P (3,6), P (0,6), P (0,0) } } },
+        { 'I', { { P (2,0), P (2,6) } } },
+        { 'G', { { P (4,0), P (0,0), P (0,6), P (4,6), P (4,3), P (2,3) } } },
+        { 'T', { { P (0,0), P (4,0) }, { P (2,0), P (2,6) } } },
+        { 'A', { { P (0,6), P (0,1), P (1,0), P (3,0), P (4,1), P (4,6) }, { P (0,3.4f), P (4,3.4f) } } },
+        { 'L', { { P (0,0), P (0,6), P (4,6) } } },
+        { 'S', { { P (4,0), P (0,0), P (0,3), P (4,3), P (4,6), P (0,6) } } },
+        { 'Y', { { P (0,0), P (0,3), P (4,3) }, { P (4,0), P (4,3) }, { P (2,3), P (2,6) } } },
+        { 'N', { { P (0,6), P (0,0), P (4,6), P (4,0) } } },
+        { 'H', { { P (0,0), P (0,6) }, { P (4,0), P (4,6) }, { P (0,3), P (4,3) } } },
+        { 'E', { { P (4,0), P (0,0), P (0,6), P (4,6) }, { P (0,3), P (3,3) } } },
+        { 'Z', { { P (0,0), P (4,0), P (0,6), P (4,6) } } },
+        { 'R', { { P (0,6), P (0,0), P (4,0), P (4,3), P (0,3) }, { P (2,3), P (4,6) } } },
+        { 'C', { { P (4,0), P (0,0), P (0,6), P (4,6) } } },
+        { 'O', { { P (0,0), P (4,0), P (4,6), P (0,6), P (0,0) } } },
+        { 'F', { { P (4,0), P (0,0), P (0,6) }, { P (0,3), P (3,3) } } },
+        { '2', { { P (0,0), P (4,0), P (4,3), P (0,3), P (0,6), P (4,6) } } },
+    };
+    return g;
+}
+
+// pos = estremo sinistro (o destro se alignRight) della riga, y al centro del testo
+void digital (Graphics& g, const String& txt, Point<float> pos, float h, bool alignRight)
+{
+    const float u = h / 6.0f, adv = u * 5.6f;
+    float width = 0.0f;
+    for (auto ch : txt) width += ch == ' ' ? u * 4.0f : adv;
+    float x = alignRight ? pos.x - width + u * 1.6f : pos.x;
+    const float y0 = pos.y - h * 0.5f;
+    for (auto ch : txt)
+    {
+        if (ch == ' ') { x += u * 4.0f; continue; }
+        for (auto& gl : digiGlyphs())
+        {
+            if (gl.c != (char) ch) continue;
+            for (auto& line : gl.lines)
+                for (size_t i = 1; i < line.size(); ++i)
+                {
+                    const Point<float> a (x + line[i - 1].x * u, y0 + line[i - 1].y * u), b (x + line[i].x * u, y0 + line[i].y * u);
+                    const float L = a.getDistanceFrom (b), gap = jmin (u * 0.35f, L * 0.3f);
+                    const auto d = (b - a) / L;
+                    g.drawLine (Line<float> (a + d * gap, b - d * gap), u * 0.95f);   // tratti spezzati agli angoli
+                }
+        }
+        x += adv;
+    }
+}
 } // namespace
 
 //==============================================================================
@@ -91,7 +146,7 @@ Fonts& Fonts::get() { static Fonts f; return f; }
 Fonts::Fonts()
 {
     wide = Typeface::createSystemTypefaceFor (BinaryData::Michroma_ttf, BinaryData::Michroma_ttfSize);
-    slab = Typeface::createSystemTypefaceFor (BinaryData::AlfaSlabOne_ttf, BinaryData::AlfaSlabOne_ttfSize);
+    slab = Typeface::createSystemTypefaceFor (BinaryData::Ultra_ttf, BinaryData::Ultra_ttfSize);
 }
 Font Fonts::label (float h) const { return Font (FontOptions (wide).withHeight (h)); }
 Font Fonts::logo (float h) const  { return Font (FontOptions (slab).withHeight (h)); }
@@ -437,7 +492,7 @@ Panel::Panel (DsProcessor& p) : proc (p), keys (p.keyboardState), lever (p, *thi
     addAndMakeVisible (lever);
     lever.setBounds (Rectangle<int> (150, 120).withCentre ({ 150, 870 }));
 
-    logoArea = { 1440.0f, 545.0f, 300.0f, 56.0f };
+    logoArea = { 1150.0f, 532.0f, 490.0f, 56.0f };
     startTimerHz (30);
 }
 
@@ -750,28 +805,39 @@ void Panel::paint (Graphics& g)
         g.fillPath (p);
     }
 
-    // ------------------------------------------------ targa (logo)
+    // ------------------------------------------------ targa DISSONA 2 (stile CRUMAR: lettere slab in caselle inclinate)
     {
-        auto plate = logoArea;
-        g.setColour (Colours::black.withAlpha (0.45f)); g.fillRoundedRectangle (plate.translated (2, 3), 4.0f);
-        const char* letters[] = { "D", "S", "7", "8" };
-        const float cw = plate.getWidth() / 4.0f;
-        for (int i = 0; i < 4; ++i)
+        const float bw = 54.0f, bh = 56.0f, gap = 7.0f, sl = 0.14f;
+        const float y = logoArea.getY();
+        float x = logoArea.getX();
+        const char* letters[] = { "D", "I", "S", "S", "O", "N", "A", "2" };
+        for (int i = 0; i < 8; ++i)
         {
-            auto cell = Rectangle<float> (plate.getX() + cw * (float) i, plate.getY(), cw, plate.getHeight()).reduced (2.5f, 0.0f);
-            g.setColour (Colour (0xff15140f)); g.fillRoundedRectangle (cell, 7.0f);
-            g.setColour (kPrint); g.drawRoundedRectangle (cell.reduced (2.0f), 6.0f, 2.6f);
+            if (i == 7) x += 12.0f;
+            const bool accent = (i == 0 || i == 2);           // la D e la S del nome originale
+            const Rectangle<float> cell (x, y, bw, bh);
+            const auto c = cell.getCentre();
+            const auto italic = AffineTransform::translation (-c.x, -c.y).sheared (-sl, 0.0f).translated (c.x, c.y);
+            Path box; box.addRoundedRectangle (cell.reduced (1.5f), 9.0f);
+            box.applyTransform (italic);
+            g.setColour (Colours::black.withAlpha (0.35f)); g.fillPath (box, AffineTransform::translation (1.5f, 2.5f));
+            g.setColour (Colour (0xff1e1c18)); g.fillPath (box);
+            g.setColour (accent ? kLine.brighter (0.15f) : kPrint);
+            g.strokePath (box, PathStrokeType (accent ? 3.6f : 2.2f));
+
             GlyphArrangement ga;
-            ga.addLineOfText (Fonts::get().logo (40.0f), letters[i], 0, 0);
+            ga.addLineOfText (Fonts::get().logo (100.0f), letters[i], 0, 0);
             Path p; ga.createPath (p);
             const auto bb = p.getBounds();
-            p.applyTransform (AffineTransform::translation (-bb.getCentreX(), -bb.getCentreY())
-                                  .scaled (1.0f, 1.0f).sheared (-0.12f, 0.0f).translated (cell.getCentre()));
+            const float sc = (bh * 0.66f) / bb.getHeight();
+            p.applyTransform (AffineTransform::translation (-bb.getCentreX(), -bb.getCentreY()).scaled (sc).translated (c).followedBy (italic));
+            g.setColour (accent || i == 7 ? kPrint : kPrint.withMultipliedBrightness (0.74f));
             g.fillPath (p);
+            x += bw + gap;
         }
         g.setColour (kPrint);
-        text (g, "DIGITAL   SYNTHESIZER   DS-78", { 1592, 619 }, 12.0f);
-        text (g, "Collateral Effects", { 1272, 619 }, 10.0f);
+        digital (g, "DIGITAL  SYNTHESIZER", { x - gap, y + bh + 22.0f }, 13.0f, true);
+        digital (g, "COLLATERAL  EFFECTS", { logoArea.getX() + 4.0f, y + bh + 22.0f }, 9.0f, false);
     }
 }
 
@@ -871,7 +937,7 @@ void Panel::showSettingsMenu()
     qm.addItem (601, "Alta (sovracampionamento doppio)", true, val (pid::quality) > 0.5f);
 
     PopupMenu m;
-    m.addSectionHeader ("DS-78  -  Collateral Effects");
+    m.addSectionHeader ("DISSONA 2  -  Collateral Effects");
     m.addSubMenu ("Pitch bend MIDI", bm);
     m.addSubMenu ("Estensione della tastiera", km);
     m.addSubMenu ("Trigger degli inviluppi", tm);

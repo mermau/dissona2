@@ -5,7 +5,7 @@ using namespace ds;
 
 DsProcessor::DsProcessor()
     : AudioProcessor (BusesProperties().withOutput ("Uscita", juce::AudioChannelSet::stereo(), true)),
-      apvts (*this, nullptr, "DS78", createLayout())
+      apvts (*this, nullptr, "DISSONA2", createLayout())
 {
     for (auto* p : getParameters())
         if (auto* rp = dynamic_cast<juce::RangedAudioParameter*> (p))

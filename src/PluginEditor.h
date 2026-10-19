@@ -7,7 +7,7 @@ struct Fonts
 {
     static Fonts& get();
     juce::Font label (float h) const;   // Michroma: caratteri larghi e squadrati come la serigrafia
-    juce::Font logo (float h) const;    // Alfa Slab One: lettere della targa
+    juce::Font logo (float h) const;    // Ultra: slab pesante come le lettere della targa CRUMAR
     juce::Typeface::Ptr wide, slab;
 private:
     Fonts();

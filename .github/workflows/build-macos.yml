@@ -30,7 +30,7 @@ jobs:
             -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0
 
       - name: Compila VST3, AU e Standalone
-        run: cmake --build build --config Release --target DS78_VST3 DS78_AU DS78_Standalone -j 4
+        run: cmake --build build --config Release --target Dissona2_VST3 Dissona2_AU Dissona2_Standalone -j 4
 
       - name: Test del motore DSP
         run: |
@@ -39,35 +39,35 @@ jobs:
 
       - name: Firma ad-hoc
         run: |
-          A=build/DS78_artefacts/Release
-          codesign --force --deep --sign - "$A/VST3/DS-78.vst3"
-          codesign --force --deep --sign - "$A/AU/DS-78.component"
-          codesign --force --deep --sign - "$A/Standalone/DS-78.app"
-          codesign --verify --deep --strict "$A/Standalone/DS-78.app"
+          A=build/Dissona2_artefacts/Release
+          codesign --force --deep --sign - "$A/VST3/DISSONA 2.vst3"
+          codesign --force --deep --sign - "$A/AU/DISSONA 2.component"
+          codesign --force --deep --sign - "$A/Standalone/DISSONA 2.app"
+          codesign --verify --deep --strict "$A/Standalone/DISSONA 2.app"
 
       - name: Validazione Audio Unit (auval)
         continue-on-error: true
         run: |
           mkdir -p ~/Library/Audio/Plug-Ins/Components
-          cp -R build/DS78_artefacts/Release/AU/DS-78.component ~/Library/Audio/Plug-Ins/Components/
+          cp -R build/Dissona2_artefacts/Release/AU/DISSONA 2.component ~/Library/Audio/Plug-Ins/Components/
           killall -9 AudioComponentRegistrar 2>/dev/null || true
-          auval -v aumu Ds78 Clfx
+          auval -v aumu Dsn2 Clfx
 
       - name: Pacchetto
         run: |
-          A=build/DS78_artefacts/Release
-          mkdir -p dist/DS-78
-          cp -R "$A/VST3/DS-78.vst3" "$A/AU/DS-78.component" "$A/Standalone/DS-78.app" dist/DS-78/
-          cp scripts/installa.command "dist/DS-78/Installa DS-78.command"
-          chmod +x "dist/DS-78/Installa DS-78.command"
-          cp README.md dist/DS-78/LEGGIMI.md
-          (cd dist && ditto -c -k --keepParent DS-78 DS-78-macOS.zip)
+          A=build/Dissona2_artefacts/Release
+          mkdir -p dist/DISSONA-2
+          cp -R "$A/VST3/DISSONA 2.vst3" "$A/AU/DISSONA 2.component" "$A/Standalone/DISSONA 2.app" dist/DISSONA-2/
+          cp scripts/installa.command "dist/DISSONA-2/Installa DISSONA 2.command"
+          chmod +x "dist/DISSONA-2/Installa DISSONA 2.command"
+          cp README.md dist/DISSONA-2/LEGGIMI.md
+          (cd dist && ditto -c -k --keepParent DISSONA-2 DISSONA-2-macOS.zip)
 
       - uses: actions/upload-artifact@v4
         with:
-          name: DS-78-macOS
+          name: DISSONA-2-macOS
           path: |
-            dist/DS-78-macOS.zip
+            dist/DISSONA-2-macOS.zip
             test-audio/*.wav
 
       - name: Release (solo sui tag v*)
@@ -75,4 +75,4 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "${GITHUB_REF_NAME}" dist/DS-78-macOS.zip --title "DS-78 ${GITHUB_REF_NAME}" --notes "Build macOS universale (Apple Silicon + Intel) - VST3, AU e Standalone."
+          gh release create "${GITHUB_REF_NAME}" dist/DISSONA-2-macOS.zip --title "DISSONA 2 ${GITHUB_REF_NAME}" --notes "Build macOS universale (Apple Silicon + Intel) - VST3, AU e Standalone."

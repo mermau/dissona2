@@ -11,7 +11,7 @@
 //    nota (P-432): f = f_clk·N/4096, con N proporzionale alla frequenza della nota (DO acuto = 4095).
 //    Gli impulsi del rate multiplier non sono equidistanti: questo produce il leggero "jitter" dei
 //    DCO originali. Seguono il divisore di registro (4'…32') e il contatore della forma d'onda:
-//      dente di sega 16 gradini, triangolo 32 gradini (16 livelli), quadra, impulso con larghezza
+//      dente di sega 15 gradini, triangolo 30 passi (16 livelli), quadra, impulso con larghezza
 //      quantizzata a 1/32 di periodo (50 % … 6 %). Le forme d'onda sono a gradini, senza filtri di
 //      ricostruzione: i gradini sono resi con polyBLEP, quindi le immagini spettrali reali dei
 //      gradini restano (il suono "ringy/chirpy" del DS-2) ma senza aliasing digitale.
@@ -292,24 +292,31 @@ class Dco
 public:
     static constexpr int kPrescale = 16;
 
-    void reset() { phase = 0.0; c = 0; pre = 0; wc = 0; level = 0.0f; blep.reset(); }
+    void reset() { phase = 0.0; c = 0; pos = 0; level = 0.0f; blep.reset(); }
 
-    static float levelFor (int wave, uint32_t w, int pw)
+    // Livello della forma d'onda alla posizione pos (0 … period−1) del periodo.
+    //  sega: 15 gradini (le registrazioni dell'originale mostrano zeri spettrali esatti alle
+    //        armoniche 15, 30, 45, 60); triangolo: 30 passi (15 su, 15 giù);
+    //  quadra e impulso: 32 suddivisioni del periodo (larghezza d'impulso quantizzata a 1/32).
+    static float levelFor (int wave, int pos, int period, int pw)
     {
+        const int64_t p = pos;
         switch (wave)
         {
-            case 0:  return (float) (w >> 1) / 15.0f;                                         // sega 16 gradini
-            case 1:  return (float) ((w & 16u) ? (15u - (w & 15u)) : (w & 15u)) / 15.0f;       // triangolo
-            case 2:  return (w & 16u) ? 1.0f : 0.0f;                                          // quadra
-            default: return (int) w < pw ? 1.0f : 0.0f;                                       // impulso
+            case 0:  return (float) (p * 15 / period) / 14.0f;
+            case 1:  { const int k = (int) (p * 30 / period); return (float) (k <= 15 ? k : 30 - k) / 15.0f; }
+            case 2:  return p * 2 < period ? 1.0f : 0.0f;
+            default: return (int) (p * 32 / period) < pw ? 1.0f : 0.0f;
         }
     }
 
     // clockPerSample = f_clk / fs, n = codice del rate multiplier (1…4095), total = divisione totale
     inline float tick (double clockPerSample, int n, int total, int wave, int pw)
     {
+        const int period = 32 * total;
+        if (pos >= period) pos %= period;
         // un cambio di forma o di larghezza d'impulso modifica subito il livello
-        const float now = levelFor (wave, wc, pw);
+        const float now = levelFor (wave, pos, period, pw);
         if (now != level) { blep.step (now - level, 1.0f); level = now; }
 
         phase += clockPerSample;
@@ -320,16 +327,12 @@ public:
             const int j = __builtin_ctz (~c);              // n. di 1 finali → bit del moltiplicatore abilitato
             if (j < 12 && ((n >> (11 - j)) & 1))
             {
-                if (++pre >= total)
+                if (++pos >= period) pos = 0;
+                const float nl = levelFor (wave, pos, period, pw);
+                if (nl != level)
                 {
-                    pre = 0;
-                    wc = (wc + 1u) & 31u;
-                    const float nl = levelFor (wave, wc, pw);
-                    if (nl != level)
-                    {
-                        blep.step (nl - level, (float) (phase / clockPerSample));
-                        level = nl;
-                    }
+                    blep.step (nl - level, (float) (phase / clockPerSample));
+                    level = nl;
                 }
             }
         }
@@ -338,8 +341,8 @@ public:
 
 private:
     double phase = 0.0;
-    uint32_t c = 0, wc = 0;
-    int pre = 0;
+    uint32_t c = 0;
+    int pos = 0;
     float level = 0.0f;
     BlepLine blep;
 };
@@ -433,6 +436,15 @@ public:
     static constexpr float kStage = 1.5f; // (330/33330) / (220/33220)
     static constexpr float kPole4 = 150.0f / 22.0f;
 
+    // limite d'escursione morbido (uscita degli OTA e buffer BF244 verso le alimentazioni)
+    static inline float softRail (float v)
+    {
+        constexpr float knee = 0.55f * kRail, span = kRail - knee;
+        const float a = std::fabs (v);
+        if (a <= knee) return v;
+        return std::copysign (knee + span * fastTanh ((a - knee) / span), v);
+    }
+
     void prepare (double sampleRate) { fs = sampleRate; reset(); }
     void reset() { s.fill (0.0f); e.fill (0.0f); y.fill (0.0f); }
 
@@ -477,9 +489,9 @@ public:
         for (int i = 0; i < 4; ++i)
         {
             s[(size_t) i] = 2.0f * y[(size_t) i] - s[(size_t) i];
-            if (std::fabs (s[(size_t) i]) > kRail) s[(size_t) i] = std::copysign (kRail, s[(size_t) i]);
+            s[(size_t) i] = softRail (s[(size_t) i]);
         }
-        return std::clamp (y[3], -kRail, kRail);
+        return softRail (y[3]);
     }
 
 private:
