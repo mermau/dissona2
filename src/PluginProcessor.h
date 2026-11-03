@@ -100,6 +100,7 @@ private:
     // valori arrivati da un CC appreso: usati subito dal motore, passati alla DAW dal thread principale
     struct ParamRef { std::atomic<float>* raw; juce::RangedAudioParameter* param; int index; };
     std::unordered_map<std::string, ParamRef> raw;
+    std::unordered_map<const char*, const ParamRef*> byPtr;     // pid::… → parametro, senza stringhe
     std::vector<std::unique_ptr<std::atomic<float>>> pendingCC;   // normalizzato, NaN = nessuno
     float rawv (const char* id) const;
 

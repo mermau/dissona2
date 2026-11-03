@@ -303,9 +303,36 @@ public:
     // reostato da 1M a filo in serie a 10K: f = 30 Hz · 10K / (10K + R)
     static double rateHz (float knob) { return 30.0 * 10.0 / (10.0 + 990.0 * (1.0 - std::clamp ((double) knob, 0.0, 1.0))); }
 
-    inline void tick (float rate, float mul = 1.0f)
+    // velocità impostata una volta per blocco (la manopola non cambia dentro un blocco)
+    void setRate (float rate, float mul = 1.0f) { inc = 4.0 * rateHz (rate) * mul / fs; }
+
+    // Uscite del contatore HBF4727 (pin 14 = bit meno significativo … pin 11 = più significativo).
+    // STAIRCASE: pin 14…11 attraverso 470K, 220K, 100K, 47K; RANDOM: gli stessi pin attraverso
+    // 47K, 100K, 220K, 470K. I pesi 1 : 2,14 : 4,7 : 10 non sono esattamente binari, quindi sull'originale
+    // i gradini sono irregolari. Amplificatori invertenti: 8K2 (staircase) e 5K6 (random) su 10K.
+    struct Steps { std::array<float, 16> stair, rnd; };
+    static const Steps& steps()
     {
-        const double inc = 4.0 * rateHz (rate) * mul / fs;
+        static const Steps t = []
+        {
+            Steps st {};
+            const double wS[4] = { 1.0 / 470.0, 1.0 / 220.0, 1.0 / 100.0, 1.0 / 47.0 };
+            const double wR[4] = { 1.0 / 47.0, 1.0 / 100.0, 1.0 / 220.0, 1.0 / 470.0 };
+            const double full = wS[0] + wS[1] + wS[2] + wS[3];
+            for (int c = 0; c < 16; ++c)
+            {
+                double sS = 0.0, sR = 0.0;
+                for (int b = 0; b < 4; ++b) if ((c >> b) & 1) { sS += wS[b]; sR += wR[b]; }
+                st.stair[(size_t) c] = (float) (1.0 - 2.0 * sS / full);                   // scala discendente
+                st.rnd[(size_t) c]   = (float) ((5.6 / 8.2) * (1.0 - 2.0 * sR / full));   // stesso invertitore, guadagno 5K6
+            }
+            return st;
+        }();
+        return t;
+    }
+
+    inline void tick()
+    {
         tri += dir * inc;
         if (tri >= 1.0)       { tri = 2.0 - tri;  dir = -1; }
         else if (tri <= -1.0) { tri = -2.0 - tri; dir = 1; count = (count + 1) & 15; }   // HBF4727 sul fronte
@@ -314,19 +341,16 @@ public:
         triOut = t;
         sqOut = (float) dir;
         sawOut = t * (float) dir;           // commutazione di polarità: sega a frequenza doppia
-        // scala discendente (pesi 47K…470K, amplificatore invertente) e "random" (pesi invertiti)
-        const float stair = 1.0f - 2.0f * (float) count / 15.0f;
-        const int rev = ((count & 1) << 3) | ((count & 2) << 1) | ((count & 4) >> 1) | ((count & 8) >> 3);
-        const float rnd = 0.62f * (2.0f * (float) rev / 15.0f - 1.0f);
-        stairOut = hp.tick (stair);
-        randOut = hpR.tick (rnd);
+        const auto& tb = steps();
+        stairOut = hp.tick (tb.stair[(size_t) count]);
+        randOut = hpR.tick (tb.rnd[(size_t) count]);
     }
     float led() const { return dir > 0 ? 1.0f : 0.0f; }
 
     float triOut = 0, sqOut = 1, sawOut = 0, stairOut = 0, randOut = 0;
 
 private:
-    double fs = 96000.0, tri = 0.0;
+    double fs = 96000.0, tri = 0.0, inc = 0.0;
     int dir = 1, count = 0;
     DcBlock hp, hpR;
 };
@@ -394,64 +418,85 @@ private:
 };
 
 //==============================================================================================
-// Sezione POLY: MK50240 + divisori, una scala a 8 gradini per tasto
+// Sezione POLY: MK50240 + divisori, una scala a 8 gradini per tasto.
+// Per ogni classe di nota si tiene l'elenco dei soli tasti che suonano (o stanno chiudendo il
+// contatto): il costo dipende dalle note premute, non dalle 128 possibili.
 class PolySection
 {
 public:
+    static constexpr int kDiv[12] = { 478, 451, 426, 402, 379, 358, 338, 319, 301, 284, 268, 253 };
+
     void prepare (double sampleRate)
     {
         fs = sampleRate;
         rampInc = (float) (1.0 / (0.0004 * fs));      // chiusura del contatto ≈ 0,4 ms
+        for (int pc = 0; pc < 12; ++pc) incScale[(size_t) pc] = 2.0 / ((double) kDiv[pc] * fs);
         reset();
     }
     void reset()
     {
-        for (auto& p : pcs) { p.phase = 0.0; p.h = 0; }
-        for (auto& n : notes) { n.g = 0.0f; n.on = false; n.lvl = 0.0f; }
+        for (auto& p : pcs) { p.phase = 0.0; p.h = 0; p.count = 0; }
+        for (auto& n : notes) { n.g = 0.0f; n.on = false; n.lvl = 0.0f; n.listed = false; }
+        active = 0;
         blep.reset();
     }
-    void setKey (int m, bool down) { if (m >= 0 && m < 128) notes[(size_t) m].on = down; }
-    bool silent() const
+    void setKey (int m, bool down)
     {
-        for (auto& n : notes) if (n.on || n.g > 0.0f) return false;
-        return true;
+        if (m < 12 || m > 127) return;                 // la tastiera della POLY parte dal DO0
+        auto& n = notes[(size_t) m];
+        n.on = down;
+        if (down && ! n.listed)
+        {
+            auto& p = pcs[(size_t) (m % 12)];
+            p.list[(size_t) p.count++] = (uint8_t) m;
+            n.listed = true;
+            ++active;
+        }
     }
+    bool silent() const { return active == 0; }
     void allOff() { for (auto& n : notes) n.on = false; }
 
     // fin = frequenza d'ingresso del MK50240 (2,00024 MHz a 8')
     inline float tick (double fin)
     {
-        static constexpr int kDiv[12] = { 478, 451, 426, 402, 379, 358, 338, 319, 301, 284, 268, 253 };
         float sum = 0.0f;
         for (int pc = 0; pc < 12; ++pc)
         {
             auto& p = pcs[(size_t) pc];
             // mezzi periodi dell'uscita quadra del MK50240 (f_in / divisore)
-            p.phase += 2.0 * fin / (double) kDiv[pc] / fs;
-            const int first = pc + 12 * 1;       // nota più bassa gestita per questa classe (C#0…)
-            bool any = false;
-            for (int m = first; m < 128; m += 12) if (notes[(size_t) m].on || notes[(size_t) m].g > 0.0f) { any = true; break; }
-            if (! any) { p.h += (uint64_t) p.phase; p.phase -= std::floor (p.phase); continue; }
-
+            const double inc = fin * incScale[(size_t) pc];
+            p.phase += inc;
+            if (p.count == 0)
+            {
+                if (p.phase >= 1.0) { const double w = std::floor (p.phase); p.h += (uint64_t) w; p.phase -= w; }
+                continue;
+            }
             while (p.phase >= 1.0)
             {
                 p.phase -= 1.0;
                 ++p.h;
-                const float d = (float) (p.phase / (2.0 * fin / (double) kDiv[pc] / fs));
-                for (int m = first; m < 128; m += 12)
+                const float d = (float) (p.phase / inc);
+                for (int i = 0; i < p.count; ++i)
                 {
-                    auto& n = notes[(size_t) m];
-                    if (n.g <= 0.0f && ! n.on) continue;
-                    const float nl = levelOf (p.h, m, pc);
+                    auto& n = notes[(size_t) p.list[(size_t) i]];
+                    const float nl = levelOf (p.h, p.list[(size_t) i], pc);
                     if (nl != n.lvl) { blep.step (n.g * (nl - n.lvl), d); n.lvl = nl; }
                 }
             }
-            for (int m = first; m < 128; m += 12)
+            for (int i = 0; i < p.count; ++i)
             {
+                const int m = p.list[(size_t) i];
                 auto& n = notes[(size_t) m];
                 if (n.on && n.g < 1.0f)       { n.lvl = levelOf (p.h, m, pc); n.g = std::min (1.0f, n.g + rampInc); }
                 else if (! n.on && n.g > 0.0f) n.g = std::max (0.0f, n.g - rampInc);
                 sum += n.g * n.lvl;
+                if (! n.on && n.g <= 0.0f)
+                {
+                    // contatto aperto: la nota esce dall'elenco
+                    n.listed = false;
+                    p.list[(size_t) i] = p.list[(size_t) (p.count - 1)];
+                    --p.count; --active; --i;
+                }
             }
         }
         return blep.out (sum);
@@ -468,10 +513,12 @@ private:
         return w0 * bit (b) + w1 * bit (b - 1) + w2 * bit (b - 2) - mean;
     }
 
-    struct Pc { double phase = 0.0; uint64_t h = 0; };
-    struct Note { bool on = false; float g = 0.0f, lvl = 0.0f; };
+    struct Pc { double phase = 0.0; uint64_t h = 0; std::array<uint8_t, 11> list {}; int count = 0; };
+    struct Note { bool on = false, listed = false; float g = 0.0f, lvl = 0.0f; };
     std::array<Pc, 12> pcs;
     std::array<Note, 128> notes;
+    std::array<double, 12> incScale {};
+    int active = 0;
     double fs = 96000.0;
     float rampInc = 0.05f;
     BlepLine blep;
@@ -497,7 +544,7 @@ public:
     }
 
     void prepare (double sampleRate) { fs = sampleRate; reset(); }
-    void reset() { s.fill (0.0f); e.fill (0.0f); y.fill (0.0f); }
+    void reset() { s.fill (0.0f); e.fill (0.0f); y.fill (0.0f); lastFc = -1.0; }
 
     // controreazione del potenziometro di risonanza (reostato 100K + 3K3 + RV3 ≈ 0,9K)
     static float feedbackFor (float resKnob)
@@ -506,11 +553,25 @@ public:
         return 33.2f / r;
     }
 
+    // tan(x) per 0 ≤ x ≤ 1,45 (fino a 0,46·fs): metà angolo + Padé 7/6, errore relativo < 1e-9
+    static inline double tanPrewarp (double x)
+    {
+        const double h = 0.5 * x, h2 = h * h;
+        const double t = h * (135135.0 + h2 * (-17325.0 + h2 * (378.0 - h2)))
+                           / (135135.0 + h2 * (-62370.0 + h2 * (3150.0 - 28.0 * h2)));
+        return 2.0 * t / (1.0 - t * t);
+    }
+
     inline float tick (float x, double fc, float k)
     {
-        const double lim = 0.45 * fs;
-        const float g = (float) std::tan (kPi * std::min (fc, lim) / fs);
-        const float g4 = (float) std::tan (kPi * std::min (fc * kPole4, lim) / fs);
+        if (fc != lastFc)
+        {
+            const double lim = 0.45 * fs;
+            lastFc = fc;
+            gC  = (float) tanPrewarp (kPi * std::min (fc, lim) / fs);
+            g4C = (float) tanPrewarp (kPi * std::min (fc * kPole4, lim) / fs);
+        }
+        const float g = gC, g4 = g4C;
         const float u = kStage * x;
         // due passate: la seconda linearizza le tanh attorno alla soluzione della prima
         std::array<float, 4> est = e;
@@ -546,7 +607,8 @@ public:
     }
 
 private:
-    double fs = 96000.0;
+    double fs = 96000.0, lastFc = -1.0;
+    float gC = 0.0f, g4C = 0.0f;
     std::array<float, 4> s {}, e {}, y {};
 };
 
@@ -576,6 +638,7 @@ public:
         }
         whiteLp.setAnalog (1.0, 0.0, 0.0, 1.0, 1.0 / (2.0 * kPi * 18000.0), 0.0, fs);
         lastLow = lastHigh = 99.0f;
+        smoothCoef = (float) (1.0 - std::exp (-1.0 / (0.004 * fs)));
         reset();
     }
 
@@ -589,6 +652,7 @@ public:
         held.fill (false); sustained.fill (false);
         gate = false; delayT = 0.0;
         codeNow = codeTarget = codeFor (60);
+        smoothInit = false; codeDirty = true;
     }
 
     void setParams (const EngineParams& np) { p = np; }
@@ -641,7 +705,8 @@ public:
         if (canRest && quietSamples > (int) (0.05 * fs))
         {
             sleeping = true;
-            for (int i = 0; i < n; ++i) { lfo1.tick (p.lfo1Rate, t.lfo1); lfo2.tick (p.lfo2Rate, t.lfo2); }
+            lfo1.setRate (p.lfo1Rate, t.lfo1); lfo2.setRate (p.lfo2Rate, t.lfo2);
+            for (int i = 0; i < n; ++i) { lfo1.tick(); lfo2.tick(); }
             std::fill (out, out + n, 0.0f);
             if (polyOut != nullptr) std::fill (polyOut, polyOut + n, 0.0f);
             return;
@@ -654,48 +719,71 @@ public:
             lowSh.setShelf (false, 300.0, 15.0 * p.polyLow, fs);
             highSh.setShelf (true, 1500.0, 15.0 * p.polyHigh, fs);
         }
-        const float smooth = (float) (1.0 - std::exp (-1.0 / (0.004 * fs)));
         const int d1 = 8 >> std::clamp (p.o1Range, 0, 3), d2 = 8 >> std::clamp (p.o2Range, 0, 3);
-        const float k = Ds2Filter::feedbackFor (p.vcfRes);
         const double glideHz = glideClock() * t.glide;
         const double tune = p.tuneA4 / 440.0;
+        const int w1 = std::clamp (p.o1Wave, 0, 3), w2 = std::clamp (p.o2Wave, 0, 2);
+        const bool polyToFilter = p.polyOn && ! p.polySplit, polySplitOut = p.polyOn && p.polySplit;
+        const bool extOpenNow = p.extOpen && ext != nullptr && p.extVol > 0.0f;
+        const float dep = t.lfoDepth;
+        const double delayT0 = p.lfoDelay <= 0.001f ? 0.0 : (0.05 + 9.95 * logTaper (p.lfoDelay)) * t.delay;
+
+        // --- valori che dipendono solo dalle manopole: calcolati una volta per blocco, poi avvicinati
+        //     campione per campione (4 ms) nel dominio in cui agiscono, così non ci sono scalini
+        lfo1.setRate (p.lfo1Rate, t.lfo1);
+        lfo2.setRate (p.lfo2Rate, t.lfo2);
+        Smoothed tgt;
+        tgt.cutOct = 10.55 * std::pow ((double) std::clamp (p.vcfCut, 0.0f, 1.0f), 0.48);
+        tgt.k = Ds2Filter::feedbackFor (p.vcfRes) * t.resK;
+        tgt.g1 = loadedPot (p.o1Vol, 33.0f, 100.0f) * 5.0f * t.mix[0];
+        tgt.g2 = loadedPot (p.o2Vol, 33.0f, 100.0f) * 5.0f * t.mix[1];
+        tgt.gn = loadedPot (p.noiseVol, 33.0f, 100.0f) * t.mix[2];
+        tgt.gp = 1.8f * loadedPot (p.polyVol, 10.0f, 100.0f);
+        tgt.gx = loadedPot (p.extVol, 33.0f, 50.0f) * 5.0f;
+        tgt.gOut = 0.075f * loadedPot (p.volume, 517.0f, 50.0f);
+        tgt.r1 = std::exp2 (p.o1Pitch * 6.0 / 12.0);
+        tgt.r2 = std::exp2 (p.o2Pitch * 9.0 / 12.0);
+        tgt.rp = std::exp2 (p.polyPitch * 4.0 / 12.0);
+        tgt.rb = std::exp2 (p.bend * p.bendRange / 12.0);
+        tgt.ped = p.pedalOct * p.pedal;
+        tgt.vcfEnv = 9.0f * p.vcfEnv;
+        tgt.vcaEnv = p.vcaEnv;
+        tgt.vib1 = 1.21f * dep * (float) logTaper (p.mxO1Amt);
+        tgt.vib2 = 1.21f * dep * (float) logTaper (p.mxO2Amt);
+        tgt.vcfMod = 1.5f * dep * p.mxVcfAmt;
+        tgt.vcaMod = 0.5f * dep * p.mxVcaAmt;
+        tgt.polyMod = 1.21f * dep * (float) logTaper (p.polyLfoAmt);
+        if (! smoothInit) { sm = tgt; smoothInit = true; }
+        const float a = smoothCoef;
+        const double clk1 = kClock8 * tune * t.clk1 / fs, clk2 = kClock8 * tune * t.clk2 / fs;
+        const double polyBase = kMk8 * tune * t.clkPoly * (p.polyOct == 0 ? 0.5 : p.polyOct == 2 ? 2.0 : 1.0);
+        const double kbd = 1.393 / 4095.0;
+        const double fcMax = 0.45 * fs;
 
         for (int i = 0; i < n; ++i)
         {
-            // parametri continui con un po' di inerzia (le manopole non hanno scatti)
-            sCut += (p.vcfCut - sCut) * smooth;
-            sK   += (k - sK) * smooth;
-            sV1  += (p.o1Vol - sV1) * smooth;
-            sV2  += (p.o2Vol - sV2) * smooth;
-            sVn  += (p.noiseVol - sVn) * smooth;
-            sVp  += (p.polyVol - sVp) * smooth;
-            sVol += (p.volume - sVol) * smooth;
-            sP1  += (p.o1Pitch - sP1) * smooth;
-            sP2  += (p.o2Pitch - sP2) * smooth;
-            sPp  += (p.polyPitch - sPp) * smooth;
-            sBend += (p.bend - sBend) * smooth;
-            sPed += (p.pedal - sPed) * smooth;
+            sm.approach (tgt, a);
 
             // --- LFO e ritardo
-            lfo1.tick (p.lfo1Rate, t.lfo1);
-            lfo2.tick (p.lfo2Rate, t.lfo2);
-            if (gate) delayT += 1.0 / (fs * t.delay);
-            const float dly = delayGain();
+            lfo1.tick();
+            lfo2.tick();
+            float dly = 1.0f;
+            if (gate) delayT += 1.0 / fs;
+            if (delayT0 > 0.0) dly = (float) std::clamp ((delayT / delayT0 - 0.3) / 0.7, 0.0, 1.0);
             const float l1 = lfo1Wave() * (p.lfo1Delay ? dly : 1.0f);
             const float l2 = lfo2Wave() * (p.lfo2Delay ? dly : 1.0f);
 
             // --- LFO's MIXER (P-445)
-            const float dep = t.lfoDepth;
-            auto src = [l1, l2, dep] (int s) { return dep * (s == 1 ? l1 : s == 2 ? l2 : s == 3 ? 0.5f * (l1 + l2) : 0.0f); };
-            const float vib1 = 1.21f * src (p.mxO1Src) * (float) logTaper (p.mxO1Amt);
-            const float vib2 = 1.21f * src (p.mxO2Src) * (float) logTaper (p.mxO2Amt);
-            const float vcfMod = src (p.mxVcfSrc) * p.mxVcfAmt;
-            const float vcaMod = src (p.mxVcaSrc) * p.mxVcaAmt;
+            auto src = [l1, l2] (int s) { return s == 1 ? l1 : s == 2 ? l2 : s == 3 ? 0.5f * (l1 + l2) : 0.0f; };
+            const float vib1 = src (p.mxO1Src) * sm.vib1;
+            const float vib2 = src (p.mxO2Src) * sm.vib2;
+            const float vcfMod = src (p.mxVcfSrc) * sm.vcfMod;
+            const float vcaMod = src (p.mxVcaSrc) * sm.vcaMod;
             float pwc = p.mxPwAmt;
             if (p.mxPwSrc == 1) pwc *= 0.5f * (l1 + 1.0f);
             else if (p.mxPwSrc == 2) pwc *= 0.5f * (l2 + 1.0f);
             const int pw = (int) std::lround (16.0f - 14.0f * std::clamp (pwc, 0.0f, 1.0f));
-            const float polyMod = 1.21f * src (p.polyLfoSrc) * (float) logTaper (p.polyLfoAmt);
+            const float polyMod = src (p.polyLfoSrc) * sm.polyMod;
 
             // --- inviluppi
             const float eF = envF.tick (gate);
@@ -713,64 +801,64 @@ public:
                     if (codeTarget > codeNow) codeNow = std::min (codeTarget, codeNow + steps);
                     else                      codeNow = std::max (codeTarget, codeNow - steps);
                 }
+                splitCode (codeNow, d1, cn1, ct1);
+                splitCode (codeNow, d2, cn2, ct2);
             }
+            else if (d1 != lastD1 || d2 != lastD2 || codeDirty)
+            {
+                splitCode (codeNow, d1, cn1, ct1);
+                splitCode (codeNow, d2, cn2, ct2);
+            }
+            lastD1 = d1; lastD2 = d2; codeDirty = false;
 
-            // --- DCO
-            const double bendMul = std::exp2 (sBend * p.bendRange / 12.0);
-            const double c1 = kClock8 * tune * t.clk1 * std::exp2 (sP1 * 6.0 / 12.0) * bendMul * std::max (0.05, 1.0 + 0.6 * vib1);
-            const double c2 = kClock8 * tune * t.clk2 * std::exp2 (sP2 * 9.0 / 12.0) * bendMul * std::max (0.05, 1.0 + 0.6 * vib2);
-            int n1, t1, n2, t2;
-            splitCode (codeNow, d1, n1, t1);
-            splitCode (codeNow, d2, n2, t2);
-            const float o1 = dco1.tick (c1 / fs, n1, t1, std::clamp (p.o1Wave, 0, 3), pw);
-            const float o2 = dco2.tick (c2 / fs, n2, t2, std::clamp (p.o2Wave, 0, 2), pw);
+            // --- DCO (vibrato, PITCH e leva agiscono sul master clock: modulazione lineare in Hz)
+            const double c1 = clk1 * sm.r1 * sm.rb * std::max (0.05, 1.0 + 0.6 * vib1);
+            const double c2 = clk2 * sm.r2 * sm.rb * std::max (0.05, 1.0 + 0.6 * vib2);
+            const float o1 = dco1.tick (c1, cn1, ct1, w1, pw);
+            const float o2 = dco2.tick (c2, cn2, ct2, w2, pw);
 
             // --- POLY
-            const double fin = kMk8 * tune * t.clkPoly * (p.polyOct == 0 ? 0.5 : p.polyOct == 2 ? 2.0 : 1.0)
-                             * std::exp2 (sPp * 4.0 / 12.0) * std::max (0.05, 1.0 + 0.6 * polyMod);
+            // i divisori girano sempre, come sull'originale: un tasto premuto parte da una fase qualsiasi
+            const double fin = polyBase * sm.rp * std::max (0.05, 1.0 + 0.6 * polyMod);
             float pl = poly.tick (fin);
-            pl = highSh.tick (lowSh.tick (pl)) * 1.8f * loadedPot (sVp, 10.0f, 100.0f);
-            pl = dcP.tick (pl);
+            pl = dcP.tick (highSh.tick (lowSh.tick (pl)) * sm.gp);
 
             // --- NOISE
             const float w = whiteLp.tick (noise.bipolar() * 1.73f);
             const float nz = dcN.tick (p.noisePink ? pink.tick (w) * 0.9f : w) * 1.2f;
 
             // --- mixer d'ingresso del VCF (volt prima dei 33K)
-            sVx += (p.extVol - sVx) * smooth;
-            float x = dc1.tick (o1 * 5.0f) * loadedPot (sV1, 33.0f, 100.0f) * t.mix[0]
-                    + dc2.tick (o2 * 5.0f) * loadedPot (sV2, 33.0f, 100.0f) * t.mix[1]
-                    + nz * loadedPot (sVn, 33.0f, 100.0f) * t.mix[2];
-            const bool polyToFilter = p.polyOn && ! p.polySplit;
+            float x = dc1.tick (o1 * sm.g1) + dc2.tick (o2 * sm.g2) + nz * sm.gn;
             if (polyToFilter) x += pl * t.mix[3];
             // ingresso AUX (BUSS B pin 8): 0 dBFS ≈ 5 V picco, potenziometro da 50K come suggerito da Bassi
-            if (ext != nullptr) x += dcX.tick (ext[i] * 5.0f) * loadedPot (sVx, 33.0f, 50.0f);
+            if (ext != nullptr) x += dcX.tick (ext[i] * sm.gx);
+            // rumore di fondo del circuito (≈ −110 dB rispetto a 5 V): come sull'hardware innesca
+            // l'autooscillazione del filtro anche senza segnale in ingresso
+            x += 1.5e-5f * floorRng.bipolar();
 
             // --- VCF
-            double oct = 10.55 * std::pow ((double) std::clamp (sCut, 0.0f, 1.0f), 0.48)
-                       + 9.0 * (double) (p.vcfEnv * eF) + 1.5 * (double) vcfMod
-                       + (double) (p.pedalOct * sPed) + (double) t.cutOct;
+            const double oct = sm.cutOct + (double) (sm.vcfEnv * eF) + (double) vcfMod + (double) sm.ped + (double) t.cutOct;
             double fc = 16.0 * std::exp2 (oct);
-            if (p.kbdCtrl) fc *= 1.393 * (double) codeNow / 4095.0;
-            fc = std::clamp (fc, 4.0, 0.45 * fs);
-            const float yf = vcf.tick (x, fc, sK * t.resK);
+            if (p.kbdCtrl) fc *= kbd * (double) codeNow;
+            fc = std::clamp (fc, 4.0, fcMax);
+            const float yf = vcf.tick (x, fc, sm.k);
 
             // --- VCA
             float envSel;
             if (p.vcaSwMode == 0) envSel = p.vcaIn ? eF : eA;
-            else { gateLevel += ((gate ? 1.0f : 0.0f) - gateLevel) * smooth; envSel = p.vcaIn ? eA : gateLevel; }
-            float cv = std::max (0.0f, p.vcaEnv * std::max (envSel, 0.0f) + 0.5f * vcaMod);
-            if (p.extOpen && ext != nullptr && p.extVol > 0.0f) cv = std::max (cv, 1.0f);
+            else { gateLevel += ((gate ? 1.0f : 0.0f) - gateLevel) * a; envSel = p.vcaIn ? eA : gateLevel; }
+            float cv = std::max (0.0f, sm.vcaEnv * std::max (envSel, 0.0f) + vcaMod);
+            if (extOpenNow) cv = std::max (cv, 1.0f);
             constexpr float Sv = 24.5f;
             float y = cv * Sv * fastTanh (yf / Sv);
 
             // --- uscita (volume generale 50K lin., MAIN / HEAD)
-            y = dcOut.tick (y) * 0.075f * loadedPot (sVol, 517.0f, 50.0f);
+            y = dcOut.tick (y) * sm.gOut;
             if (p.headphones) y = 1.2f * fastTanh (y * 2.0f / 1.2f);
             out[i] = y;
             quietSamples = std::fabs (y) < 3.0e-5f ? quietSamples + 1 : 0;   // -90 dBFS
             if (polyOut != nullptr)
-                polyOut[i] = (p.polyOn && p.polySplit) ? 0.06f * pl * loadedPot (sVol, 517.0f, 50.0f) : 0.0f;
+                polyOut[i] = polySplitOut ? (0.06f / 0.075f) * pl * sm.gOut : 0.0f;
         }
     }
 
@@ -832,13 +920,6 @@ private:
         return fmax / (1.0 + 49.0 * (1.0 - std::clamp ((double) p.glideSpeed, 0.0, 1.0)));
     }
 
-    float delayGain() const
-    {
-        if (p.lfoDelay <= 0.001f) return 1.0f;
-        const double T = 0.05 + 9.95 * logTaper (p.lfoDelay);
-        return (float) std::clamp ((delayT / T - 0.3) / 0.7, 0.0, 1.0);
-    }
-
     float lfo1Wave() const
     {
         switch (p.lfo1Wave)
@@ -869,7 +950,7 @@ private:
     Ds2Filter vcf;
     DcBlock dc1, dc2, dcN, dcP, dcOut, dcX;
     Biquad pink, whiteLp, lowSh, highSh;
-    Rng noise { 0x9e3779b9u };
+    Rng noise { 0x9e3779b9u }, floorRng { 0x85ebca6bu };
     float lastLow = 99.0f, lastHigh = 99.0f;
 
     std::array<bool, 128> held {}, sustained {};
@@ -878,15 +959,34 @@ private:
     Tolerances tolSeed, tolNone;
     bool sleeping = false;
     int quietSamples = 0;
-    float sVx = 0.0f, sPed = 0.0f;
     bool sustainPedal = false, gate = false;
     int lastNote = 60;
     int64_t codeNow = 1, codeTarget = 1;
     double glideAcc = 0.0, delayT = 0.0;
     float gateLevel = 0.0f;
 
-    float sCut = 0.6f, sK = 0.33f, sV1 = 0.7f, sV2 = 0.0f, sVn = 0.0f, sVp = 0.6f, sVol = 0.7f;
-    float sP1 = 0.0f, sP2 = 0.0f, sPp = 0.0f, sBend = 0.0f;
+    // valori derivati dalle manopole, avvicinati ai loro obiettivi campione per campione
+    struct Smoothed
+    {
+        double cutOct = 8.0, r1 = 1.0, r2 = 1.0, rp = 1.0, rb = 1.0;
+        float k = 0.3f, g1 = 0, g2 = 0, gn = 0, gp = 0, gx = 0, gOut = 0, ped = 0, vcfEnv = 0, vcaEnv = 0;
+        float vib1 = 0, vib2 = 0, vcfMod = 0, vcaMod = 0, polyMod = 0;
+        inline void approach (const Smoothed& t, float a)
+        {
+            const double ad = a;
+            cutOct += (t.cutOct - cutOct) * ad; r1 += (t.r1 - r1) * ad; r2 += (t.r2 - r2) * ad;
+            rp += (t.rp - rp) * ad; rb += (t.rb - rb) * ad;
+            k += (t.k - k) * a; g1 += (t.g1 - g1) * a; g2 += (t.g2 - g2) * a; gn += (t.gn - gn) * a;
+            gp += (t.gp - gp) * a; gx += (t.gx - gx) * a; gOut += (t.gOut - gOut) * a; ped += (t.ped - ped) * a;
+            vcfEnv += (t.vcfEnv - vcfEnv) * a; vcaEnv += (t.vcaEnv - vcaEnv) * a;
+            vib1 += (t.vib1 - vib1) * a; vib2 += (t.vib2 - vib2) * a; vcfMod += (t.vcfMod - vcfMod) * a;
+            vcaMod += (t.vcaMod - vcaMod) * a; polyMod += (t.polyMod - polyMod) * a;
+        }
+    } sm;
+    bool smoothInit = false;
+    float smoothCoef = 0.0026f;
+    int cn1 = 1, ct1 = 1, cn2 = 1, ct2 = 1, lastD1 = -1, lastD2 = -1;
+    bool codeDirty = true;
 };
 
 } // namespace ds2

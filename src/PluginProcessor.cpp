@@ -17,6 +17,8 @@ DsProcessor::DsProcessor()
         if (auto* rp = dynamic_cast<juce::RangedAudioParameter*> (ps[i]))
             raw[rp->paramID.toStdString()] = { apvts.getRawParameterValue (rp->paramID), rp, i };
     }
+    for (const char* id : pid::all)
+        byPtr[id] = &raw.at (id);
     // ogni istanza è un esemplare diverso: il seme viene salvato con il progetto
     seed.store ((uint32_t) juce::Random::getSystemRandom().nextInt() | 1u);
     seedChanged.store (true);
@@ -30,7 +32,8 @@ DsProcessor::~DsProcessor() { stopTimer(); }
 // valore di un parametro: un CC appena arrivato ha la precedenza finché la DAW non lo ha ricevuto
 float DsProcessor::rawv (const char* id) const
 {
-    const auto& r = raw.at (id);
+    const auto it = byPtr.find (id);
+    const auto& r = it != byPtr.end() ? *it->second : raw.at (id);
     const float pend = pendingCC[(size_t) r.index]->load();
     if (! std::isnan (pend)) return r.param->convertFrom0to1 (pend);
     return r.raw->load();
@@ -87,7 +90,6 @@ void DsProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
         overs[st]->initProcessing ((size_t) samplesPerBlock);
     }
     selectFactor (factorFor (rawv (pid::quality) > 0.5f));
-    setLatencySamples (oversampler != nullptr ? (int) std::round (oversampler->getLatencyInSamples()) : 0);
     work.setSize (2, samplesPerBlock);
     hiMain.assign ((size_t) samplesPerBlock * 4, 0.0f);
     hiPoly.assign ((size_t) samplesPerBlock * 4, 0.0f);
@@ -110,6 +112,9 @@ void DsProcessor::selectFactor (int factor)
     osFactor = factor;
     oversampler = factor == 4 ? overs[2].get() : (factor == 2 ? overs[1].get() : nullptr);
     if (oversampler) oversampler->reset();
+    // la latenza dei filtri di sovracampionamento cambia con il fattore: la DAW deve saperlo
+    const int lat = oversampler != nullptr ? (int) std::round (oversampler->getLatencyInSamples()) : 0;
+    if (lat != getLatencySamples()) setLatencySamples (lat);
     engine.prepare (hostRate * factor);
     engine.setSeed (seed.load());
 }

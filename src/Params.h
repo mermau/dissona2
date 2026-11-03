@@ -81,6 +81,17 @@ inline constexpr const char* pedal     = "vcf_pedal";
 inline constexpr const char* pedalRange= "pedal_range";
 inline constexpr const char* tune      = "tune";
 inline constexpr const char* tolerances= "tolerances";
+
+// tutti gli identificatori: il processore li usa per una ricerca per indirizzo (senza stringhe)
+inline constexpr const char* all[] = {
+    mxO1Amt, mxO1Src, mxO2Amt, mxO2Src, mxVcfAmt, mxVcfSrc, mxVcaAmt, mxVcaSrc, mxPwAmt, mxPwSrc,
+    lfo1Rate, lfo1Wave, lfo1Delay, lfo2Rate, lfo2Wave, lfo2Delay, lfoDelay, o1Vol, o1Pitch, o1Range,
+    o1Wave, o2Vol, o2Pitch, o2Range, o2Wave, kbdCtrl, vcfEnv, vcfCut, vcfRes, vcfA, vcfD, vcfS, vcfR,
+    vcaEnv, vcaA, vcaD, vcaS, vcaR, vcaIn, noiseVol, noisePink, polyLfoAmt, polyLfoSrc, polyHigh,
+    polyLow, polyVol, polyOn, polyOct, polyPitch, headMain, volume, glideOn, glideLong, glideSpeed,
+    bend, bendRange, keyRange, retrigger, vcaSwMode, polySplit, quality, extVol, extOpen, priority,
+    pedal, pedalRange, tune, tolerances
+};
 }
 
 namespace ds
