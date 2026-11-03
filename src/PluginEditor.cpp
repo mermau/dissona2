@@ -706,7 +706,7 @@ Panel::Panel (DsProcessor& p) : proc (p), keys (p.keyboardState), lever (p, *thi
         { pid::lfo1Delay, 632, 108, true, false, "LFO 1: DELAY inserito (IN, a destra)" },
         { pid::lfo2Delay, 1040, 108, true, false, "LFO 2: DELAY inserito (IN, a destra)" },
         { pid::kbdCtrl,   674, 448, true, false, "KEYBOARD CONTROL: IN (a destra) il filtro segue la tastiera" },
-        { pid::vcaIn,     1160, 302, true, true, "Deviatore VCF/VCA: IN (a sinistra) l'ADSR del VCF comanda anche il VCA" },
+        { pid::vcaIn,     1160, 291, true, true, "Deviatore VCF/VCA: IN (a sinistra) l'ADSR del VCF comanda anche il VCA" },
         { pid::headMain,  1732, 322, true, true, "HEAD / MAIN: uscita cuffia (a sinistra, più forte) o principale" },
         { pid::glideOn,   1745, 752, true, true, "GLIDE: IN (a sinistra) portamento attivo" },
         { pid::glideLong, 1745, 862, true, true, "SPEED RANGE: IN (a sinistra) estende i portamenti lunghi" },
@@ -870,8 +870,8 @@ void Panel::paint (Graphics& g)
     boxes.push_back (roundedPoly ({ { 454, 158 }, { 672, 158 }, { 672, 404 }, { 612, 404 }, { 612, 524 }, { 454, 524 } }, rr)); // OSC 1
     boxes.push_back (roundedPoly ({ { 680, 158 }, { 898, 158 }, { 898, 524 }, { 740, 524 }, { 740, 404 }, { 680, 404 } }, rr)); // OSC 2
     rect (620, 412, 732, 524);                                 // KEYBOARD CONTROL
-    boxes.push_back (roundedPoly ({ { 906, 158 }, { 1238, 158 }, { 1238, 270 }, { 1160, 270 }, { 1160, 524 }, { 906, 524 } }, rr)); // VCF
-    boxes.push_back (roundedPoly ({ { 1246, 158 }, { 1430, 158 }, { 1430, 524 }, { 1168, 524 }, { 1168, 310 }, { 1246, 310 } }, rr)); // VCA
+    boxes.push_back (roundedPoly ({ { 906, 158 }, { 1238, 158 }, { 1238, 285 }, { 1160, 285 }, { 1160, 524 }, { 906, 524 } }, rr)); // VCF
+    boxes.push_back (roundedPoly ({ { 1246, 158 }, { 1430, 158 }, { 1430, 524 }, { 1168, 524 }, { 1168, 293 }, { 1246, 293 } }, rr)); // VCA
     // pannelli della tastiera
     boxes.push_back (roundedPoly ({ { 30, 660 }, { 270, 660 }, { 270, 946 }, { 30, 946 } }, 14));
     boxes.push_back (roundedPoly ({ { 1700, 660 }, { 1852, 660 }, { 1852, 946 }, { 1700, 946 } }, 14));
@@ -994,7 +994,12 @@ void Panel::paint (Graphics& g)
         }
         g.fillRect (x0 - 2.0f, y - 2.0f, 2.0f, 22.0f);
         g.fillRect (x1, y - 2.0f, 4.5f, 22.0f);
-        if (pw) { text (g, "50%", { x0 - 20.0f, y + 12.0f }, 8.5f); text (g, "5%", { x1 + 18.0f, y + 12.0f }, 8.5f); }
+        if (pw)
+        {
+            // estremi della corsa sopra le viti, lontani dal filetto della sezione
+            text (g, "50 %", { x0 - 6.0f, y - 52.0f }, 10.0f);
+            text (g, "5 %", { x1 + 12.0f, y - 52.0f }, 10.0f);
+        }
     };
     for (float y : { 78.0f, 170.0f, 262.0f, 353.0f }) hScale (162, y + 26, 150, false);
     hScale (162, 443 + 26, 150, true);
@@ -1033,7 +1038,7 @@ void Panel::paint (Graphics& g)
     text (g, "IN", { 708, 448 }, 10.5f);
     text (g, "KEYBOARD", { 676, 486 }, 9.5f);
     text (g, "CONTROL", { 676, 500 }, 9.5f);
-    text (g, "IN", { 1192, 304 }, 10.5f);
+    text (g, "IN", { 1187, 306 }, 10.5f);   // come sul DS-2: dentro il VCA, a sinistra della A
     text (g, "HEAD.", { 1706, 356 }, 10.0f);
     text (g, "MAIN", { 1768, 356 }, 10.0f);
 
@@ -1086,13 +1091,13 @@ void Panel::paint (Graphics& g)
     // ------------------------------------------------ sezione EXT. INPUT (aggiunta di DISSONA 2)
     {
         g.setColour (kLine);
-        g.drawRoundedRectangle (Rectangle<float> (700, 532, 260, 76), 14.0f, 2.2f);
+        g.drawRoundedRectangle (Rectangle<float> (700, 530, 260, 92), 14.0f, 2.2f);
         g.setColour (kPrint);
         text (g, "EXT. INPUT", { 830, 548 }, 11.0f);
         text (g, "GATE", { 846, 584 }, 9.5f);
         text (g, "OPEN", { 922, 584 }, 9.5f);
-        text (g, "VCA", { 884, 604 }, 8.5f);
-        text (g, "LEVEL", { 744, 604 }, 8.5f);
+        text (g, "VCA", { 884, 608 }, 9.0f);
+        text (g, "LEVEL", { 744, 608 }, 9.0f);
     }
 
     // ------------------------------------------------ targa DISSONA 2 (stile CRUMAR: lettere slab in caselle inclinate)
